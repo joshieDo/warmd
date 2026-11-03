@@ -178,6 +178,7 @@ fn checks_patches_against_warm_generations() {
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
+    assert!(!stats["machine"]["cpu_model"].as_str().unwrap().is_empty(), "{stats:#}");
     assert_eq!(stats["repos"][0]["view"]["gens"].as_array().unwrap().len(), 2, "{stats:#}");
     assert!(stats["repos"][0]["view"]["gens"][0]["expires_in_secs"].is_u64(), "{stats:#}");
     assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");

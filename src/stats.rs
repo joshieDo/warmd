@@ -20,22 +20,24 @@ const HISTORY_POINTS: usize = 144;
 #[derive(Debug, Default)]
 pub(crate) struct Machine {
     samples: Mutex<VecDeque<Sample>>,
+    per_core: Mutex<Vec<f64>>,
 }
 
 impl Machine {
     pub(crate) async fn sample_forever(&self) -> ! {
         let mut ticks = interval(SAMPLE_EVERY);
-        let mut last: Option<CpuTimes> = None;
+        let mut last: Option<Vec<CpuTimes>> = None;
         loop {
             ticks.tick().await;
             match (cpu_times().await, memory().await) {
                 (Ok(times), Ok((total, used))) => {
-                    if let Some(before) = last {
-                        self.push(Sample {
-                            at: now_secs(),
-                            cpu: times.percent_since(before),
-                            mem: percent(used, total),
-                        });
+                    if let Some(before) = &last {
+                        let usage =
+                            times.iter().zip(before).map(|(now, then)| now.percent_since(*then)).collect::<Vec<_>>();
+                        if let Some((all, cores)) = usage.split_first() {
+                            self.push(Sample { at: now_secs(), cpu: *all, mem: percent(used, total) });
+                            cores.clone_into(&mut self.per_core.lock().unwrap_or_else(PoisonError::into_inner));
+                        }
                     }
                     last = Some(times);
                 }
@@ -66,6 +68,11 @@ impl Machine {
             errors.push(format!("disks: {err:#}"));
             Vec::new()
         });
+        let cpu_model = cpu_model().await.unwrap_or_else(|err| {
+            errors.push(format!("cpu model: {err:#}"));
+            String::new()
+        });
+        let cpu_per_core = self.per_core.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let cores = available_parallelism()
             .map_err(Error::from)
             .and_then(|count| Ok(u32::try_from(count.get())?))
@@ -77,6 +84,8 @@ impl Machine {
         let step = samples.len().div_ceil(HISTORY_POINTS).max(1);
         MachineView {
             cores,
+            cpu_model,
+            cpu_per_core,
             load,
             mem_total,
             mem_used,
@@ -93,6 +102,8 @@ impl Machine {
 #[derive(Debug, Serialize)]
 pub(crate) struct MachineView {
     cores: u32,
+    cpu_model: String,
+    cpu_per_core: Vec<f64>,
     load: Vec<f64>,
     mem_total: u64,
     mem_used: u64,
@@ -125,6 +136,17 @@ struct CpuTimes {
 }
 
 impl CpuTimes {
+    fn parse(line: &str) -> anyhow::Result<Self> {
+        let fields = line.split_whitespace().skip(1).take(8).map(str::parse::<u64>).collect::<Result<Vec<_>, _>>()?;
+        let total = fields.iter().sum::<u64>();
+        let idle = fields
+            .get(3)
+            .zip(fields.get(4))
+            .map(|(idle, iowait)| idle + iowait)
+            .ok_or_else(|| missing("no idle time"))?;
+        Ok(Self { busy: total.checked_sub(idle).ok_or_else(|| missing("idle exceeds total"))?, total })
+    }
+
     fn percent_since(self, before: Self) -> f64 {
         percent(self.busy.saturating_sub(before.busy), self.total.saturating_sub(before.total))
     }
@@ -143,14 +165,15 @@ fn peak_of(chunk: &[Sample]) -> Option<Sample> {
     })
 }
 
-async fn cpu_times() -> anyhow::Result<CpuTimes> {
+async fn cpu_times() -> anyhow::Result<Vec<CpuTimes>> {
     let text = read_to_string("/proc/stat").await?;
-    let line = text.lines().next().ok_or_else(|| missing("/proc/stat is empty"))?;
-    let fields = line.split_whitespace().skip(1).take(8).map(str::parse::<u64>).collect::<Result<Vec<_>, _>>()?;
-    let total = fields.iter().sum::<u64>();
-    let idle =
-        fields.get(3).zip(fields.get(4)).map(|(idle, iowait)| idle + iowait).ok_or_else(|| missing("no idle time"))?;
-    Ok(CpuTimes { busy: total.checked_sub(idle).ok_or_else(|| missing("idle exceeds total"))?, total })
+    text.lines().filter(|line| line.starts_with("cpu")).map(CpuTimes::parse).collect()
+}
+
+async fn cpu_model() -> anyhow::Result<String> {
+    let text = read_to_string("/proc/cpuinfo").await?;
+    let line = text.lines().find(|line| line.starts_with("model name")).ok_or_else(|| missing("no model name"))?;
+    Ok(line.split_once(':').map_or(line, |(_, model)| model).trim().to_owned())
 }
 
 async fn memory() -> anyhow::Result<(u64, u64)> {

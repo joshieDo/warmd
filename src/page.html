@@ -34,6 +34,9 @@ code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; 
 .muted { color: var(--muted); }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--faint); }
 .ready, .ok { background: var(--positive); } .refreshing, .running, .queued { background: var(--warning); } .failed { background: var(--negative); }
+.cores { display: flex; gap: 2px; height: 24px; margin-top: 10px; align-items: flex-end; }
+.cores > div { flex: 1; height: 100%; background: var(--fill); border-radius: 1px; display: flex; align-items: flex-end; }
+.cores > div > div { width: 100%; background: var(--text); border-radius: 1px; }
 .chip { display: inline-block; padding: 1px 6px; border-radius: 6px; background: var(--fill); margin: 0 4px 4px 0; }
 </style>
 </head>
@@ -58,13 +61,14 @@ const spark = (pts, key) => {
   return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none"><path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>';
 };
 const stat = (label, value, sub, extra = "") => '<div class="card stat"><h2>' + label + '</h2><div class="value">' + value + '</div><div class="sub">' + sub + '</div>' + extra + '</div>';
+const cores = list => '<div class="cores">' + list.map((p, i) => '<div title="cpu' + i + ' ' + p.toFixed(0) + '%"><div style="height:' + Math.min(p, 100).toFixed(0) + '%"></div></div>').join("") + '</div>';
 const bar = p => '<div class="bar"><div style="width:' + Math.min(p, 100).toFixed(1) + '%"></div></div>';
 const dot = s => '<span class="dot ' + esc(s) + '"></span>';
 async function load() {
   const s = await (await fetch("/stats")).json();
   const m = s.machine, now = m.now || { cpu: 0, mem: 0 };
   $("machine").innerHTML =
-    stat("CPU", now.cpu.toFixed(0) + "%", "peak 24h " + m.peak_cpu.toFixed(0) + "% · " + m.cores + " threads · load " + m.load.map(l => l.toFixed(1)).join(" "), spark(m.history, "cpu")) +
+    stat("CPU · " + m.cores + " threads", now.cpu.toFixed(0) + "%", esc(m.cpu_model) + "<br>peak 24h " + m.peak_cpu.toFixed(0) + "% · load " + m.load.map(l => l.toFixed(1)).join(" "), cores(m.cpu_per_core) + spark(m.history, "cpu")) +
     stat("Memory", gb(m.mem_used), "of " + gb(m.mem_total) + " · peak 24h " + m.peak_mem.toFixed(0) + "%", spark(m.history, "mem")) +
     m.disks.map(d => stat("Disk " + esc(d.mount), pct(d.used, d.size).toFixed(0) + "%", gb(d.used) + " of " + gb(d.size), bar(pct(d.used, d.size)))).join("") +
     stat("Jobs", s.jobs.running + s.jobs.queued, s.jobs.running + " running · " + s.jobs.queued + " queued · " + s.jobs.done + " done · " + s.jobs.failed + " failed");
