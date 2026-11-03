@@ -60,6 +60,15 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .s-main { background: #3b82f6; } .s-main + .s-main { background: #60a5fa; } .s-main + .s-main + .s-main { background: #93c5fd; }
 .s-old { background: #9ca3af; } .s-sess { background: #f59e0b; } .s-cache { background: #10b981; }
 #modal-body h2 { margin-top: 18px; }
+#machine { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+#machine .card { padding: 10px 12px; border-radius: 10px; }
+#machine h2 { margin-bottom: 4px; }
+#machine .value { font-size: 18px; }
+#machine .sub { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#machine svg { display: block; width: 100%; height: 22px; margin-top: 4px; }
+#machine .cores { height: 14px; margin-top: 4px; }
+#machine .bar { margin-top: 6px; }
+@media (max-width: 800px) { #machine { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
@@ -232,10 +241,10 @@ async function load() {
   const s = await (await fetch("/stats")).json();
   const m = s.machine, now = m.now || { cpu: 0, mem: 0 };
   $("machine").innerHTML =
-    stat("CPU · " + m.cores + " threads", now.cpu.toFixed(0) + "%", esc(m.cpu_model) + "<br>peak 24h " + m.peak_cpu.toFixed(0) + "% · load " + m.load.map(l => l.toFixed(1)).join(" "), cores(m.cpu_per_core) + spark(m.history, "cpu")) +
-    stat("Memory", gb(m.mem_used), "of " + gb(m.mem_total) + " · peak 24h " + m.peak_mem.toFixed(0) + "%", spark(m.history, "mem")) +
+    stat('<span title="' + esc(m.cpu_model) + '">CPU · ' + m.cores + ' threads</span>', now.cpu.toFixed(0) + "%", "load " + m.load.map(l => l.toFixed(1)).join(" ") + " · peak " + m.peak_cpu.toFixed(0) + "%", cores(m.cpu_per_core) + spark(m.history, "cpu")) +
+    stat("Memory", gb(m.mem_used), "of " + gb(m.mem_total) + " · peak " + m.peak_mem.toFixed(0) + "%", spark(m.history, "mem")) +
     m.disks.map(d => stat("Disk " + esc(d.mount), pct(d.used, d.size).toFixed(0) + "%", gb(d.used) + " of " + gb(d.size), bar(pct(d.used, d.size)))).join("") +
-    stat("Jobs", s.jobs.running + s.jobs.queued, s.jobs.running + " running · " + s.jobs.queued + " queued · " + s.jobs.done + " done · " + s.jobs.failed + " failed");
+    stat("Jobs", s.jobs.running + s.jobs.queued, s.jobs.running + " run · " + s.jobs.queued + " queued · " + s.jobs.failed + " failed");
   last = s;
   $("repos").innerHTML = s.repos.map((r, i) => {
     const v = r.view, st = v.status, b = r.last_build;
