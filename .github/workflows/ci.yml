@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features --locked
+      - run: cargo clippy --bins --all-features --locked -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary
+      - name: Install slapslop
+        env:
+          GH_TOKEN: ${{ secrets.SLAPSLOP_TOKEN }}
+        run: .github/install-slapslop.sh
+      - run: cargo-slapslop run "$PWD" --all-lints
+
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Install bubblewrap 0.11
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq meson ninja-build libcap-dev
+          git clone -q --depth 1 -b v0.11.0 https://github.com/containers/bubblewrap "$RUNNER_TEMP/bwrap"
+          meson setup "$RUNNER_TEMP/bwrap/_build" "$RUNNER_TEMP/bwrap" -Dman=disabled -Dselinux=disabled -Dtests=false
+          ninja -C "$RUNNER_TEMP/bwrap/_build"
+          sudo install "$RUNNER_TEMP/bwrap/_build/bwrap" /usr/local/bin/bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install slapslop
+        env:
+          GH_TOKEN: ${{ secrets.SLAPSLOP_TOKEN }}
+        run: .github/install-slapslop.sh
+      - run: cargo test --locked

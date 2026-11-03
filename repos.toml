@@ -1,0 +1,31 @@
+listen = "100.105.221.115:7878"
+state_dir = "state"
+
+[repos.tempo]
+url = "https://github.com/tempoxyz/tempo"
+clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
+jobs = [
+  { name = "clippy-runtime", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --bins --all-features --locked --message-format=json" },
+  { name = "clippy-tests", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --tests --all-features --locked --message-format=json" },
+  { name = "clippy-benches", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --benches --examples --all-features --locked --message-format=json" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check" },
+]
+
+[repos.reth]
+url = "https://github.com/paradigmxyz/reth"
+clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
+jobs = [
+  { name = "clippy-all-features", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --all-features --locked --message-format=json" },
+  { name = "clippy", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --locked --message-format=json" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check" },
+]
+
+[repos.slapslop]
+url = "https://github.com/tempoxyz/slapslop"
+clippy = "cargo clippy --locked --message-format=json"
+jobs = [
+  { name = "clippy", cmd = "cargo clippy --locked --workspace --lib --bins --tests --message-format=json -- -D warnings", fix = "cargo clippy --locked --workspace --fix --allow-dirty --allow-no-vcs" },
+  { name = "clippy-non-test", cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
+  { name = "fmt", cmd = "cargo fmt --all --check" },
+]
+slapslop = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run ."

@@ -1,0 +1,5 @@
+[slapslop.unbounded_retry_loop]
+allowed_in = ["warmd::repo::poll"]
+
+[slapslop.grow_only_collection_field]
+ignore_fields = ["warmd::metrics::Clock::phases"]
