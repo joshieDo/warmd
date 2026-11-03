@@ -197,6 +197,13 @@ struct Package {
     name: String,
     manifest_path: String,
     dependencies: Vec<Dependency>,
+    targets: Vec<Target>,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    kind: Vec<String>,
+    src_path: String,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +216,7 @@ struct Scope {
     touched: BTreeSet<String>,
     affected: BTreeSet<String>,
     whole: bool,
+    bins_touched: bool,
 }
 
 impl Scope {
@@ -239,6 +247,16 @@ impl Scope {
                 None => scope.whole = true,
             }
         }
+        let bin_roots = metadata
+            .packages
+            .iter()
+            .flat_map(|package| &package.targets)
+            .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+            .filter_map(|target| target.src_path.strip_prefix(root)?.strip_prefix('/'))
+            .collect::<Vec<_>>();
+        scope.bins_touched = files
+            .iter()
+            .any(|file| bin_roots.contains(&file.as_str()) || file.starts_with("bin/") || file.contains("/bin/"));
         scope.affected.clone_from(&scope.touched);
         loop {
             let dependents = metadata
@@ -411,7 +429,7 @@ async fn check(
     }
 
     let added = diag::added_lines(&req.patch);
-    let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some()) {
+    let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some() || job.bins_only) {
         let scope = Scope::of(
             &sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?.stdout,
             &sandbox::work_path(repo.name()),
@@ -432,6 +450,9 @@ async fn check(
             && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
             && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
     }) {
+        if job.bins_only && !scope.whole && !scope.bins_touched {
+            continue;
+        }
         let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
                 Some(cmd) => cmd,

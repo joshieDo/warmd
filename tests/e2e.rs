@@ -49,6 +49,7 @@ keep_hours = 1
 url = "file://{root}/demo.git"
 jobs = [
   {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
+  {{ name = "bins", cmd = "cargo clippy --bins --message-format=json -- -D warnings", bins_only = true }},
   {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', args = "--all-lints", slapslop = true }},
   {{ name = "warm", cmd = "touch target/warmed", warm_only = true }},
   {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
@@ -162,6 +163,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(report["ok_precise"], false);
     assert_eq!(report["main_moved"], false);
     assert_eq!(names(&report["jobs"]), ["clippy", "slapslop", "fmt"]);
+    assert!(!names(&report["jobs"]).contains(&"bins"), "a lib-only patch skips bins_only jobs");
     assert_eq!(codes(&report["jobs"][0]["new"]), ["clippy::ptr_arg"]);
     let slapslop = report["jobs"][1]["new"].as_array().unwrap();
     assert!(slapslop.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{slapslop:#?}");

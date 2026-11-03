@@ -56,6 +56,8 @@ pub(crate) struct Job {
     pub(crate) slapslop: bool,
     #[serde(default)]
     pub(crate) warm_only: bool,
+    #[serde(default)]
+    pub(crate) bins_only: bool,
 }
 
 impl Job {
