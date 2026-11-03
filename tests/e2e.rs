@@ -49,8 +49,8 @@ keep_hours = 1
 url = "file://{root}/demo.git"
 jobs = [
   {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
-  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', args = "--all-lints", slapslop = true }},
-  {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
+  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', args = "--all-lints", fix = 'cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --fix', slapslop = true }},
+  {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}", fix = "cargo fmt --all" }},
 ]
 "#,
             state = root.join("state").display(),
@@ -178,6 +178,10 @@ fn checks_patches_against_warm_generations() {
     let patch = warmd.diff("printf '\npub fn none(v: &[u32]) -> bool {\n    v.len() == 0\n}\n' >> src/lib.rs");
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": base }, "patch": patch, "fix": true }));
     assert!(job["result"]["fix_patch"].as_str().unwrap().contains("is_empty()"), "{job:#}");
+    let fixed = job["result"]["fix_patch"].as_str().unwrap();
+    assert!(fixed.contains("+    v.is_empty()"), "{fixed}");
+    let hazy = job["result"]["jobs"][1]["new"].as_array().unwrap();
+    assert!(hazy.iter().any(|hit| hit["hazy"] == true), "{job:#}");
 
     let job = warmd.job("slapslop/baseline", &json!({ "repo": "demo", "base": { "sha": base } }));
     assert!(job["result"]["baseline"].as_str().unwrap().contains("[[accept]]"), "{job:#}");
