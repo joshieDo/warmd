@@ -50,6 +50,7 @@ impl Request {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Report {
     ok: bool,
+    ok_precise: bool,
     ran_on: String,
     rebased_from: Option<String>,
     main_moved: bool,
@@ -229,7 +230,8 @@ async fn check(
     running: impl FnOnce(),
     clock: &mut Clock,
 ) -> anyhow::Result<Outcome> {
-    let branch = &repo.cfg().branch;
+    let cfg = repo.cfg();
+    let branch = &cfg.branch;
     if let Some(asked) = &req.base.branch {
         ensure!(asked == branch, "{asked} is not tracked for {}, only {branch}", repo.name());
     }
@@ -241,7 +243,7 @@ async fn check(
             Ok((name, profile.with_context(|| format!("no profile {name} for {}", repo.name()))?))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    if let Some(key) = req.args.keys().find(|key| !repo.cfg().jobs.iter().any(|job| job.answers_to(key))) {
+    if let Some(key) = req.args.keys().find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key))) {
         bail!("no job of {} answers to {key}", repo.name());
     }
     let current = repo.current().with_context(|| format!("{} has no generation yet", repo.name()))?;
@@ -288,7 +290,7 @@ async fn check(
     }
 
     let added = diag::added_lines(&req.patch);
-    let needs_crates = !extra.is_empty() || repo.cfg().jobs.iter().any(|job| job.on_patch.is_some());
+    let needs_crates = !extra.is_empty() || cfg.jobs.iter().any(|job| job.on_patch.is_some());
     let scope = if needs_crates {
         let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
         let scope = Scope::of(&metadata.stdout, &sandbox::work_path(repo.name()), &changed_files(&req.patch))?;
@@ -299,7 +301,7 @@ async fn check(
     };
     let packages = Scope::flags(&scope.touched);
 
-    let all_jobs = &repo.cfg().jobs;
+    let all_jobs = &cfg.jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
     for job in all_jobs {
         let template = match &job.on_patch {
@@ -348,7 +350,9 @@ async fn check(
     };
     let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none()) && hits.values().all(Vec::is_empty);
     let ran_on = generation.sha().to_owned();
-    let report = Report { ok, ran_on, rebased_from, main_moved, jobs, profiles: hits, fix_patch };
+    let ok_precise = jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none())
+        && hits.values().flatten().all(|hit| hit.hazy);
+    let report = Report { ok, ok_precise, ran_on, rebased_from, main_moved, jobs, profiles: hits, fix_patch };
     Ok(Outcome::Checked(report))
 }
 

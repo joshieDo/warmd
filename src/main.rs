@@ -18,15 +18,19 @@ use axum::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, spawn};
+use tokio::{
+    net::TcpListener,
+    signal::unix::{SignalKind, signal},
+    spawn,
+};
 use uuid::Uuid;
 
 use crate::{
     check::{Outcome, Request},
     config::Profile,
-    metrics::{Clock, Phase},
+    metrics::{Clock, Phase, RETAIN_SECS},
     repo::{Repo, View},
-    stats::Machine,
+    stats::{Machine, now_secs},
 };
 
 mod check;
@@ -63,9 +67,10 @@ enum Done {
 
 #[derive(Debug)]
 struct App {
-    repos: BTreeMap<String, Arc<Repo>>,
-    profiles: BTreeMap<String, Profile>,
-    jobs: Mutex<HashMap<Uuid, Job>>,
+    repos: Mutex<BTreeMap<String, Arc<Repo>>>,
+    profiles: Mutex<Arc<BTreeMap<String, Profile>>>,
+    jobs: Mutex<HashMap<Uuid, (u64, Job)>>,
+    config_dir: PathBuf,
     keep: Duration,
     machine: Machine,
     state_dir: PathBuf,
@@ -73,11 +78,43 @@ struct App {
 
 impl App {
     fn repo(&self, name: &str) -> Result<Arc<Repo>, (StatusCode, String)> {
-        self.repos.get(name).cloned().ok_or_else(|| (StatusCode::NOT_FOUND, format!("no repo {name}")))
+        self.repos().get(name).cloned().ok_or_else(|| (StatusCode::NOT_FOUND, format!("no repo {name}")))
+    }
+
+    fn repos(&self) -> BTreeMap<String, Arc<Repo>> {
+        self.repos.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn profiles(&self) -> Arc<BTreeMap<String, Profile>> {
+        Arc::clone(&self.profiles.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     fn set(&self, id: Uuid, job: Job) {
-        self.jobs.lock().unwrap_or_else(PoisonError::into_inner).insert(id, job);
+        let now = now_secs();
+        let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        jobs.retain(|_, (at, _)| *at >= now.saturating_sub(RETAIN_SECS));
+        jobs.insert(id, (now, job));
+    }
+
+    async fn reload(&self) -> anyhow::Result<()> {
+        let (config, profiles) = config::load(&self.config_dir)?;
+        *self.profiles.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(profiles);
+        let poll_every = Duration::from_secs(config.poll_secs);
+        let mut current = self.repos();
+        for (name, cfg) in config.repos {
+            if let Some(repo) = current.remove(&name) {
+                repo.set_cfg(cfg);
+                continue;
+            }
+            let repo = Arc::new(Repo::open(name.clone(), cfg, &self.state_dir, config.jobs_per_repo, self.keep).await?);
+            spawn(repo::poll(Arc::clone(&repo), poll_every, self.keep));
+            self.repos.lock().unwrap_or_else(PoisonError::into_inner).insert(name, repo);
+        }
+        for (name, repo) in current {
+            repo.retire();
+            self.repos.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
+        }
+        Ok(())
     }
 
     fn finish(&self, id: Uuid, result: anyhow::Result<Done>, phases: Vec<Phase>) {
@@ -102,12 +139,23 @@ async fn main() -> anyhow::Result<()> {
         repos.insert(name, repo);
     }
     let app = Arc::new(App {
-        repos,
-        profiles,
+        repos: Mutex::new(repos),
+        profiles: Mutex::new(Arc::new(profiles)),
+        config_dir: dir,
         jobs: Mutex::default(),
         keep,
         machine: Machine::default(),
         state_dir: config.state_dir.clone(),
+    });
+    let reloader = Arc::clone(&app);
+    let mut hangups = signal(SignalKind::hangup())?;
+    spawn(async move {
+        while hangups.recv().await.is_some() {
+            match reloader.reload().await {
+                Ok(()) => eprintln!("warmd: reloaded repos.toml and profiles.toml"),
+                Err(err) => eprintln!("warmd: reload failed, keeping the old config: {err:#}"),
+            }
+        }
     });
     let sampler = Arc::clone(&app);
     spawn(async move { sampler.machine.sample_forever().await });
@@ -131,7 +179,8 @@ async fn submit(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<
     app.set(id, Job::Queued);
     spawn(async move {
         let layer = repo.jobs_dir().join(id.to_string());
-        let (outcome, phases) = check::run(&repo, &app.profiles, req, &layer, || app.set(id, Job::Running)).await;
+        let profiles = app.profiles();
+        let (outcome, phases) = check::run(&repo, &profiles, req, &layer, || app.set(id, Job::Running)).await;
         app.finish(id, outcome.map(Done::Check), phases);
     });
     Ok(Json(json!({ "id": id })))
@@ -156,7 +205,7 @@ async fn refresh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply
 
 async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Job> {
     let jobs = app.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-    jobs.get(&id).cloned().map(Json).ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))
+    jobs.get(&id).map(|(_, job)| Json(job.clone())).ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))
 }
 
 async fn repo_view(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<View> {
@@ -168,21 +217,23 @@ async fn page() -> Html<&'static str> {
 }
 
 async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
-    let mut repos = Vec::with_capacity(app.repos.len());
+    let all = app.repos();
+    let mut repos = Vec::with_capacity(all.len());
     let mut recent = Vec::new();
-    for (name, repo) in &app.repos {
+    for (name, repo) in &all {
         let history = repo.recent(RECENT_PER_REPO).await;
         let last_build = history.iter().rev().find(|record| record["kind"] == "build").cloned();
         let checks = history.into_iter().filter(|record| record["kind"] != "build").collect::<Vec<_>>();
         recent.extend(checks.iter().cloned());
-        let url = repo.cfg().url.trim_end_matches(".git");
+        let cfg = repo.cfg();
+        let url = cfg.url.trim_end_matches(".git");
         repos
             .push(json!({ "name": name, "url": url, "view": repo.view(), "last_build": last_build, "checks": checks }));
     }
     recent.sort_by_key(|record| Reverse(record["at"].as_u64()));
     recent.truncate(RECENT_JOBS);
     let mut counts = BTreeMap::from([("queued", 0_u32), ("running", 0), ("done", 0), ("failed", 0)]);
-    for job in app.jobs.lock().unwrap_or_else(PoisonError::into_inner).values() {
+    for (_, job) in app.jobs.lock().unwrap_or_else(PoisonError::into_inner).values() {
         let state = match job {
             Job::Queued => "queued",
             Job::Running => "running",

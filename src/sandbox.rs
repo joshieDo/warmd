@@ -58,6 +58,11 @@ impl Sandbox<'_> {
                 bwrap.arg("--bind").arg(dir).arg(&work);
             }
             Tree::Overlay { lower, upper, work: overlay_work } => {
+                bwrap.arg("--tmpfs").arg(&home);
+                bwrap.arg("--ro-bind").arg(&rustup_home).arg(&rustup_home);
+                for tools in [home.join(".local/bin"), home.join(".local/share/slapslop")] {
+                    bwrap.arg("--ro-bind-try").arg(&tools).arg(&tools);
+                }
                 for scratch in [&cargo_home, &cache] {
                     bwrap.arg("--overlay-src").arg(scratch).arg("--tmp-overlay").arg(scratch);
                 }

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -35,7 +35,8 @@ type Parts = BTreeMap<&'static str, u64>;
 #[derive(Debug)]
 pub(crate) struct Repo {
     name: String,
-    cfg: RepoCfg,
+    cfg: Mutex<Arc<RepoCfg>>,
+    retired: AtomicBool,
     slots: Semaphore,
     jobs_dir: PathBuf,
     gens_dir: PathBuf,
@@ -77,7 +78,8 @@ impl Repo {
         };
         Ok(Self {
             name,
-            cfg,
+            cfg: Mutex::new(Arc::new(cfg)),
+            retired: AtomicBool::new(false),
             slots: Semaphore::new(usize::from(slots)),
             jobs_dir,
             gens_dir,
@@ -93,8 +95,16 @@ impl Repo {
         &self.name
     }
 
-    pub(crate) const fn cfg(&self) -> &RepoCfg {
-        &self.cfg
+    pub(crate) fn cfg(&self) -> Arc<RepoCfg> {
+        Arc::clone(&self.cfg.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(crate) fn set_cfg(&self, cfg: RepoCfg) {
+        *self.cfg.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(cfg);
+    }
+
+    pub(crate) fn retire(&self) {
+        self.retired.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn metrics_file(&self) -> PathBuf {
@@ -110,7 +120,8 @@ impl Repo {
     }
 
     fn label(&self, parts: &Parts) -> Vec<Part> {
-        let jobs = &self.cfg.jobs;
+        let cfg = self.cfg();
+        let jobs = &cfg.jobs;
         let names = |keep: &dyn Fn(&Job) -> bool| {
             jobs.iter().filter(|job| keep(job)).map(|job| job.name.clone()).collect::<Vec<_>>()
         };
@@ -229,9 +240,10 @@ impl Repo {
     }
 
     async fn remote_head(&self) -> anyhow::Result<String> {
-        let refname = format!("refs/heads/{}", self.cfg.branch);
-        let out = checked(Command::new("git").args(["ls-remote", &self.cfg.url, &refname])).await?;
-        let sha = out.split_whitespace().next().with_context(|| format!("{} has no {refname}", self.cfg.url))?;
+        let cfg = self.cfg();
+        let refname = format!("refs/heads/{}", cfg.branch);
+        let out = checked(Command::new("git").args(["ls-remote", &cfg.url, &refname])).await?;
+        let sha = out.split_whitespace().next().with_context(|| format!("{} has no {refname}", cfg.url))?;
         Ok(sha.to_owned())
     }
 
@@ -247,7 +259,7 @@ impl Repo {
             git(&tmp, &["fetch", "--quiet", "origin", sha]).await?;
             clock.mark("fetch");
         } else {
-            checked(Command::new("git").args(["clone", "--quiet", &self.cfg.url]).arg(&tmp)).await?;
+            checked(Command::new("git").args(["clone", "--quiet", &self.cfg().url]).arg(&tmp)).await?;
             clock.mark("clone");
         }
         git(&tmp, &["checkout", "--quiet", "--detach", sha]).await?;
@@ -256,7 +268,7 @@ impl Repo {
         clock.mark("submodules");
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build(&tmp) };
         let mut baseline = Baseline::new();
-        for job in self.cfg.jobs.clone() {
+        for job in self.cfg().jobs.clone() {
             let (out, found) = sandbox.diagnose(&job, &job.render(&job.cmd, None)).await?;
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));
@@ -386,8 +398,8 @@ struct Status {
     phases: Vec<Phase>,
 }
 
-pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) -> ! {
-    loop {
+pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
+    while !repo.retired.load(Ordering::Relaxed) {
         if let Err(err) = repo.refresh(keep).await {
             eprintln!("warmd: {}: {err:#}", repo.name);
         }

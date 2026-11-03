@@ -70,6 +70,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<Diag> {
             rendered: message.rendered.unwrap_or_default(),
         });
     }
+    seen.extend(rustfmt_diffs(stdout));
     seen.into_iter().collect()
 }
 
@@ -109,6 +110,34 @@ pub(crate) fn added_lines(patch: &str) -> BTreeMap<String, BTreeSet<u32>> {
         }
     }
     files
+}
+
+fn rustfmt_diffs(stdout: &str) -> Vec<Diag> {
+    let mut diags: Vec<Diag> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(place) = line.strip_prefix("Diff in ").and_then(|rest| rest.strip_suffix(':')) {
+            let Some((path, line_no)) =
+                place.rsplit_once(':').and_then(|(path, number)| Some((path, number.parse().ok()?)))
+            else {
+                continue;
+            };
+            let file =
+                path.strip_prefix("/tmp/warmd/").and_then(|rest| rest.split_once('/')).map_or(path, |(_, file)| file);
+            diags.push(Diag {
+                level: "error".to_owned(),
+                code: Some("rustfmt".to_owned()),
+                file: file.to_owned(),
+                line: line_no,
+                message: "not formatted".to_owned(),
+                hazy: false,
+                rendered: format!("{line}\n"),
+            });
+        } else if let Some(last) = diags.last_mut() {
+            last.rendered.push_str(line);
+            last.rendered.push('\n');
+        }
+    }
+    diags
 }
 
 fn slapslop_suffix(message: &str) -> Option<(&str, bool)> {

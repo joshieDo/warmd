@@ -152,6 +152,7 @@ fn checks_patches_against_warm_generations() {
     let report = &job["result"];
     assert_eq!(report["outcome"], "checked");
     assert_eq!(report["ok"], false);
+    assert_eq!(report["ok_precise"], false);
     assert_eq!(report["main_moved"], false);
     assert_eq!(names(&report["jobs"]), ["clippy", "slapslop", "fmt"]);
     assert_eq!(codes(&report["jobs"][0]["new"]), ["clippy::ptr_arg"]);
@@ -179,13 +180,27 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": base }, "patch": patch, "fix": true }));
     assert!(job["result"]["fix_patch"].as_str().unwrap().contains("is_empty()"), "{job:#}");
 
+    let secret = format!("warmd-e2e-{}", std::process::id());
+    let secret_file = PathBuf::from(env!("HOME")).join(format!(".{secret}"));
+    fs::write(&secret_file, &secret).unwrap();
+    let reader = format!(
+        "fn main() {{\n    let home = std::env::var(\"HOME\").unwrap();\n    if let Ok(found) = std::fs::read_to_string(format!(\"{{home}}/.{secret}\")) {{\n        panic!(\"leaked {{found}}\");\n    }}\n}}\n"
+    );
+    let demo = warmd.root.join("demo");
+    fs::write(demo.join("build.rs"), reader).unwrap();
+    let leak = sh(&demo, "git add -N build.rs && git diff");
+    sh(&demo, "git rm -q --cached build.rs && rm build.rs");
+    let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": base }, "patch": leak }));
+    fs::remove_file(&secret_file).unwrap();
+    assert!(!job.to_string().contains(&format!("leaked {secret}")), "{job:#}");
+
     let job = warmd.job("slapslop/baseline", &json!({ "repo": "demo", "base": { "sha": base } }));
     assert!(job["result"]["baseline"].as_str().unwrap().contains("[[accept]]"), "{job:#}");
 
     let conflicting = warmd.diff("sed -i 's/a + b/a * b/' src/lib.rs");
     sh(
         &warmd.root.join("demo"),
-        "sed -i 's/a + b/b + a/' src/lib.rs && git -c user.name=t -c user.email=t@t commit -qam swap",
+        "sed -i 's/a + b/b + a/' src/lib.rs && printf 'pub fn ugly()->u32{1}\\n' >> src/lib.rs && git -c user.name=t -c user.email=t@t commit -qam swap",
     );
     sh(&warmd.root.join("demo"), "git push -q ../demo.git main");
     let job = warmd.job("repos/demo/refresh", &json!({}));
@@ -199,6 +214,22 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
     assert_eq!(names(&job["result"]["jobs"]), ["clippy"]);
+    assert_eq!(job["result"]["ok_precise"], true);
+    let comment = warmd.diff("sed -i '1i // note' src/lib.rs");
+    let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
+    let fmt = job["result"]["jobs"].as_array().unwrap().iter().find(|job| job["name"] == "fmt").unwrap().clone();
+    assert_eq!(fmt["new"], json!([]), "{job:#}");
+
+    let profiles = fs::read_to_string(warmd.root.join("profiles.toml")).unwrap();
+    let extra = "\n[nursery]\nsteps = [{ kind = \"clippy\", targets = \"--all-targets\", args = [\"-W\", \"clippy::nursery\"] }]\n";
+    fs::write(warmd.root.join("profiles.toml"), profiles + extra).unwrap();
+    sh(&warmd.root, &format!("kill -HUP {}", warmd.child.id()));
+    sleep(Duration::from_secs(1));
+    let job = warmd.job(
+        "check",
+        &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment, "profiles": ["nursery"] }),
+    );
+    assert!(job["result"]["profiles"]["nursery"].is_array(), "{job:#}");
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
