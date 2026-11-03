@@ -58,10 +58,6 @@ jobs = [
             root = root.display(),
         );
         fs::write(root.join("repos.toml"), repos).unwrap();
-        let profiles = r#"[pedantic]
-steps = [{ kind = "clippy", targets = "--all-targets", args = ["-W", "clippy::pedantic"] }]
-"#;
-        fs::write(root.join("profiles.toml"), profiles).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_warmd")).arg(&root).spawn().unwrap();
         let warmd = Self { child, url: format!("http://127.0.0.1:{port}"), root };
         until(|| warmd.repo()["current"].is_string());
@@ -74,6 +70,10 @@ steps = [{ kind = "clippy", targets = "--all-targets", args = ["-W", "clippy::pe
 
     fn job(&self, path: &str, body: &Value) -> Value {
         let id = curl("POST", &format!("{}/{path}", self.url), Some(body)).unwrap()["id"].as_str().unwrap().to_owned();
+        self.wait(&id)
+    }
+
+    fn wait(&self, id: &str) -> Value {
         let mut job = Value::Null;
         until(|| {
             job = curl("GET", &format!("{}/jobs/{id}", self.url), None).unwrap();
@@ -146,12 +146,15 @@ fn checks_patches_against_warm_generations() {
         "repo": "demo",
         "base": { "ref": "main", "sha": base },
         "patch": patch,
-        "profiles": ["pedantic"],
+        "full": true,
         "branch": "feat/first",
     });
-    let job = warmd.job("check", &body);
+    let ids = curl("POST", &format!("{}/check", warmd.url), Some(&body)).unwrap();
+    let job = warmd.wait(ids["id"].as_str().unwrap());
+    let full_job = warmd.wait(ids["full_id"].as_str().unwrap());
     let report = &job["result"];
     assert_eq!(report["outcome"], "checked");
+    assert!(report["full"].is_null(), "{report:#}");
     assert_eq!(report["ok"], false);
     assert_eq!(report["ok_precise"], false);
     assert_eq!(report["main_moved"], false);
@@ -160,13 +163,18 @@ fn checks_patches_against_warm_generations() {
     let slapslop = report["jobs"][1]["new"].as_array().unwrap();
     assert!(slapslop.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{slapslop:#?}");
     assert!(slapslop.iter().any(|hit| hit["hazy"] == true), "{slapslop:#?}");
-    let pedantic = report["profiles"]["pedantic"].as_array().unwrap();
-    assert!(!pedantic.is_empty(), "{pedantic:#?}");
-    assert!(pedantic.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{pedantic:#?}");
+    let full = &full_job["result"]["full"];
+    assert!(full["notice"].as_str().unwrap().contains("Only the CI jobs"), "{full:#}");
+    let hits = full["hits"].as_array().unwrap();
+    assert!(!hits.is_empty(), "{full:#}");
+    assert!(hits.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{full:#}");
     let phases =
         job["phases"].as_array().unwrap().iter().map(|phase| phase["name"].as_str().unwrap()).collect::<Vec<_>>();
     assert!(phases.contains(&"job:clippy"), "{phases:?}");
-    assert!(phases.contains(&"profile:pedantic"), "{phases:?}");
+    let full_phases =
+        full_job["phases"].as_array().unwrap().iter().map(|phase| phase["name"].as_str().unwrap()).collect::<Vec<_>>();
+    assert!(full_phases.contains(&"full"), "{full_phases:?}");
+    assert!(!full_phases.contains(&"job:clippy"), "{full_phases:?}");
 
     let mut body = body;
     body["args"] =
@@ -221,16 +229,16 @@ fn checks_patches_against_warm_generations() {
     let fmt = job["result"]["jobs"].as_array().unwrap().iter().find(|job| job["name"] == "fmt").unwrap().clone();
     assert_eq!(fmt["new"], json!([]), "{job:#}");
 
-    let profiles = fs::read_to_string(warmd.root.join("profiles.toml")).unwrap();
-    let extra = "\n[nursery]\nsteps = [{ kind = \"clippy\", targets = \"--all-targets\", args = [\"-W\", \"clippy::nursery\"] }]\n";
-    fs::write(warmd.root.join("profiles.toml"), profiles + extra).unwrap();
+    let repos = fs::read_to_string(warmd.root.join("repos.toml")).unwrap();
+    fs::write(
+        warmd.root.join("repos.toml"),
+        repos.replacen("jobs = [", "jobs = [\n  { name = \"extra\", cmd = \"true\" },", 1),
+    )
+    .unwrap();
     sh(&warmd.root, &format!("kill -HUP {}", warmd.child.id()));
     sleep(Duration::from_secs(1));
-    let job = warmd.job(
-        "check",
-        &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment, "profiles": ["nursery"] }),
-    );
-    assert!(job["result"]["profiles"]["nursery"].is_array(), "{job:#}");
+    let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
+    assert_eq!(job["result"]["jobs"][0]["name"], "extra", "{job:#}");
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
@@ -252,10 +260,15 @@ fn checks_patches_against_warm_generations() {
     });
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     let parts = stats["repos"][0]["view"]["gens"][1]["parts"].as_array().unwrap();
-    let jobs_of = |bucket: &str| parts.iter().find(|part| part["jobs"][0] == bucket).map(|part| part["jobs"].clone());
+    let jobs_of = |bucket: &str| {
+        parts
+            .iter()
+            .find(|part| part["jobs"].as_array().unwrap().iter().any(|job| job == bucket))
+            .map(|part| part["jobs"].clone())
+    };
     assert!(jobs_of("clippy").is_some(), "{parts:#?}");
-    assert_eq!(jobs_of("slapslop"), Some(json!(["slapslop"])), "{parts:#?}");
-    assert_eq!(jobs_of("fmt").unwrap(), json!(["fmt"]), "{parts:#?}");
+    assert!(jobs_of("slapslop").is_some(), "{parts:#?}");
+    assert!(jobs_of("fmt").is_some(), "{parts:#?}");
     assert_eq!(stats["repos"][0]["url"], json!(format!("file://{}/demo", warmd.root.display())));
     assert!(sh(&warmd.root, &format!("curl -sf {}/", warmd.url)).contains("/stats"));
     let metrics = fs::read_to_string(warmd.root.join("state/demo/metrics.jsonl")).unwrap();

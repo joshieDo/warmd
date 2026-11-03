@@ -9,7 +9,7 @@ use serde_json::{from_str, json};
 use tokio::fs::create_dir_all;
 
 use crate::{
-    config::{ArgsOverride, Profile, Step},
+    config::{ArgsOverride, FULL_CLIPPY, Profile, Step},
     diag::{self, Diag},
     metrics::{self, Clock, Phase},
     repo::{self, Repo},
@@ -18,7 +18,9 @@ use crate::{
 
 const SLAPSLOP_BASELINE: &str = ".slapslop/baseline.toml";
 
-#[derive(Debug, Deserialize)]
+const FULL_NOTICE: &str = "Advisory: the full set (slapslop --all-lints and slapslop's recommended clippy set) on your added lines. Fix what you reasonably can; hazy hits and deliberate patterns may stay. Only the CI jobs (ok / ok_precise) decide whether the change can merge.";
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     repo: String,
@@ -26,7 +28,7 @@ pub(crate) struct Request {
     #[serde(default)]
     patch: String,
     #[serde(default)]
-    profiles: Vec<String>,
+    full: bool,
     #[serde(default)]
     fix: bool,
     slapslop_baseline: Option<String>,
@@ -35,11 +37,22 @@ pub(crate) struct Request {
     args: BTreeMap<String, ArgsOverride>,
     #[serde(skip)]
     baseline_only: bool,
+    #[serde(skip)]
+    full_only: bool,
 }
 
 impl Request {
     pub(crate) fn repo(&self) -> &str {
         &self.repo
+    }
+
+    pub(crate) const fn wants_full(&self) -> bool {
+        self.full
+    }
+
+    pub(crate) fn split_full(self) -> (Self, Self) {
+        let full = Self { full_only: true, ..self.clone() };
+        (Self { full: false, ..self }, full)
     }
 
     pub(crate) fn baseline_only(self) -> Self {
@@ -55,26 +68,26 @@ pub(crate) struct Report {
     rebased_from: Option<String>,
     main_moved: bool,
     jobs: Vec<JobResult>,
-    profiles: BTreeMap<String, Vec<Diag>>,
+    full: Option<FullReport>,
     fix_patch: Option<String>,
 }
 
 impl Report {
     fn summary(&self) -> String {
+        let full = self
+            .full
+            .as_ref()
+            .filter(|full| !full.hits.is_empty())
+            .map_or_else(String::new, |full| format!(" (full: {} advisory)", full.hits.len()));
         if self.ok {
-            return "ok".to_owned();
+            return format!("ok{full}");
         }
         let jobs = self.jobs.iter().filter_map(|job| match (job.new.len(), &job.output) {
             (0, Some(_)) => Some(format!("{} failed", job.name)),
             (0, None) => None,
             (count, _) => Some(format!("{} {count}", job.name)),
         });
-        let profiles = self
-            .profiles
-            .iter()
-            .filter(|(_, hits)| !hits.is_empty())
-            .map(|(name, hits)| format!("{name} {}", hits.len()));
-        format!("found: {}", jobs.chain(profiles).collect::<Vec<_>>().join(", "))
+        format!("found: {}{full}", jobs.collect::<Vec<_>>().join(", "))
     }
 }
 
@@ -95,7 +108,13 @@ impl Outcome {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+struct FullReport {
+    notice: &'static str,
+    hits: Vec<Diag>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Base {
     #[serde(rename = "ref")]
@@ -189,15 +208,21 @@ impl Scope {
 
 pub(crate) async fn run(
     repo: &Repo,
-    profiles: &BTreeMap<String, Profile>,
+    full: &Profile,
     req: Request,
     layer: &Path,
     running: impl FnOnce(),
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
-    let kind = if req.baseline_only { "slapslop_baseline" } else { "check" };
+    let kind = if req.baseline_only {
+        "slapslop_baseline"
+    } else if req.full_only {
+        "full"
+    } else {
+        "check"
+    };
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
-    let outcome = check(repo, profiles, req, layer, running, &mut clock).await;
+    let outcome = check(repo, full, req, layer, running, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if let Err(err) = repo::remove_tree(layer).await {
         eprintln!("warmd: {}: {err:#}", repo.name());
@@ -225,7 +250,7 @@ pub(crate) async fn run(
 
 async fn check(
     repo: &Repo,
-    profiles: &BTreeMap<String, Profile>,
+    full: &Profile,
     req: Request,
     layer: &Path,
     running: impl FnOnce(),
@@ -236,14 +261,6 @@ async fn check(
     if let Some(asked) = &req.base.branch {
         ensure!(asked == branch, "{asked} is not tracked for {}, only {branch}", repo.name());
     }
-    let extra = req
-        .profiles
-        .iter()
-        .map(|name| {
-            let profile = profiles.get(name).filter(|profile| profile.applies_to(repo.name()));
-            Ok((name, profile.with_context(|| format!("no profile {name} for {}", repo.name()))?))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
     if let Some(key) = req.args.keys().find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key))) {
         bail!("no job of {} answers to {key}", repo.name());
     }
@@ -291,7 +308,7 @@ async fn check(
     }
 
     let added = diag::added_lines(&req.patch);
-    let needs_crates = !extra.is_empty() || cfg.jobs.iter().any(|job| job.on_patch.is_some());
+    let needs_crates = req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some());
     let scope = if needs_crates {
         let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
         let scope = Scope::of(&metadata.stdout, &sandbox::work_path(repo.name()), &changed_files(&req.patch))?;
@@ -304,7 +321,7 @@ async fn check(
 
     let all_jobs = &cfg.jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
-    for job in all_jobs.iter().filter(|job| !job.warm_only) {
+    for job in all_jobs.iter().filter(|job| !job.warm_only && !req.full_only) {
         let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
                 Some(cmd) => cmd,
@@ -328,16 +345,17 @@ async fn check(
         clock.mark(format!("job:{}", job.name));
     }
 
-    let mut hits = BTreeMap::new();
-    for (name, profile) in extra {
-        let mut found = Vec::new();
-        for step in &profile.steps {
-            found.extend(run_step(sandbox, step, repo, &packages).await?);
+    let full = if req.full {
+        let mut hits = Vec::new();
+        for step in &full.steps {
+            hits.extend(run_step(sandbox, step, repo, &packages).await?);
         }
-        found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
-        hits.insert(name.clone(), found);
-        clock.mark(format!("profile:{name}"));
-    }
+        hits.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
+        clock.mark("full");
+        Some(FullReport { notice: FULL_NOTICE, hits })
+    } else {
+        None
+    };
 
     let fix_patch = if req.fix {
         for fix in all_jobs.iter().filter_map(|job| job.fix.as_deref()) {
@@ -349,22 +367,28 @@ async fn check(
     } else {
         None
     };
-    let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none()) && hits.values().all(Vec::is_empty);
+    let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none());
     let ran_on = generation.sha().to_owned();
-    let ok_precise = jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none())
-        && hits.values().flatten().all(|hit| hit.hazy);
-    let report = Report { ok, ok_precise, ran_on, rebased_from, main_moved, jobs, profiles: hits, fix_patch };
+    let ok_precise = jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none());
+    let report = Report { ok, ok_precise, ran_on, rebased_from, main_moved, jobs, full, fix_patch };
     Ok(Outcome::Checked(report))
 }
 
 async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str) -> anyhow::Result<Vec<Diag>> {
     match step {
-        Step::Clippy { targets, args, conf_dir } => {
+        Step::Clippy { targets, args, recommended } => {
             if packages.is_empty() {
                 return Ok(Vec::new());
             }
-            let conf =
-                conf_dir.as_ref().map_or_else(String::new, |dir| format!("CLIPPY_CONF_DIR='{}' ", dir.display()));
+            let conf = if *recommended {
+                let written = sandbox
+                    .run("mkdir -p target/warmd-full && cat > target/warmd-full/clippy.toml", Some(FULL_CLIPPY))
+                    .await?;
+                ensure!(written.ok(), "writing the full clippy.toml: {}", written.stderr.trim());
+                "CLIPPY_CONF_DIR=\"$PWD/target/warmd-full\" "
+            } else {
+                ""
+            };
             let cmd = format!("{conf}{} {targets} {packages} -- {}", repo.cfg().clippy, args.join(" "));
             let out = sandbox.run(&cmd, None).await?;
             Ok(diag::parse(&out.stdout))

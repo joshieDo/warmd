@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     check::{Outcome, Request},
-    config::Profile,
+    config::{Config, Profile},
     metrics::{Clock, Phase, RETAIN_SECS},
     repo::{Repo, View},
     stats::{Machine, now_secs},
@@ -68,7 +68,7 @@ enum Done {
 #[derive(Debug)]
 struct App {
     repos: Mutex<BTreeMap<String, Arc<Repo>>>,
-    profiles: Mutex<Arc<BTreeMap<String, Profile>>>,
+    full: Profile,
     jobs: Mutex<HashMap<Uuid, (u64, Job)>>,
     config_dir: PathBuf,
     keep: Duration,
@@ -85,10 +85,6 @@ impl App {
         self.repos.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    fn profiles(&self) -> Arc<BTreeMap<String, Profile>> {
-        Arc::clone(&self.profiles.lock().unwrap_or_else(PoisonError::into_inner))
-    }
-
     fn set(&self, id: Uuid, job: Job) {
         let now = now_secs();
         let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -97,8 +93,7 @@ impl App {
     }
 
     async fn reload(&self) -> anyhow::Result<()> {
-        let (config, profiles) = config::load(&self.config_dir)?;
-        *self.profiles.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(profiles);
+        let config = Config::load(&self.config_dir)?;
         let poll_every = Duration::from_secs(config.poll_secs);
         let mut current = self.repos();
         for (name, cfg) in config.repos {
@@ -129,7 +124,7 @@ impl App {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let dir = env::args_os().nth(1).map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let (config, profiles) = config::load(&dir)?;
+    let config = Config::load(&dir)?;
     let keep = Duration::from_secs(config.keep_hours * SECS_PER_HOUR);
     let poll_every = Duration::from_secs(config.poll_secs);
     let mut repos = BTreeMap::new();
@@ -140,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = Arc::new(App {
         repos: Mutex::new(repos),
-        profiles: Mutex::new(Arc::new(profiles)),
+        full: Profile::full()?,
         config_dir: dir,
         jobs: Mutex::default(),
         keep,
@@ -152,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     spawn(async move {
         while hangups.recv().await.is_some() {
             match reloader.reload().await {
-                Ok(()) => eprintln!("warmd: reloaded repos.toml and profiles.toml"),
+                Ok(()) => eprintln!("warmd: reloaded repos.toml"),
                 Err(err) => eprintln!("warmd: reload failed, keeping the old config: {err:#}"),
             }
         }
@@ -175,15 +170,25 @@ async fn main() -> anyhow::Result<()> {
 
 async fn submit(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
     let repo = app.repo(req.repo())?;
+    if req.wants_full() {
+        let (ci, full) = req.split_full();
+        let id = start(&app, &repo, ci);
+        let full_id = start(&app, &repo, full);
+        return Ok(Json(json!({ "id": id, "full_id": full_id })));
+    }
+    Ok(Json(json!({ "id": start(&app, &repo, req) })))
+}
+
+fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
     let id = Uuid::new_v4();
     app.set(id, Job::Queued);
+    let (app, repo) = (Arc::clone(app), Arc::clone(repo));
     spawn(async move {
         let layer = repo.jobs_dir().join(id.to_string());
-        let profiles = app.profiles();
-        let (outcome, phases) = check::run(&repo, &profiles, req, &layer, || app.set(id, Job::Running)).await;
+        let (outcome, phases) = check::run(&repo, &app.full, req, &layer, || app.set(id, Job::Running)).await;
         app.finish(id, outcome.map(Done::Check), phases);
     });
-    Ok(Json(json!({ "id": id })))
+    id
 }
 
 async fn slapslop_baseline(app: State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {

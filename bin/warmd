@@ -7,14 +7,12 @@ cd "$root"
 
 normalize() { sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#/$##'; }
 
-profiles=()
-fix=false
+full=false
 args_json='{}'
 while (($#)); do
   case $1 in
     check) ;;
-    --profile) profiles+=("$2"); shift ;;
-    --fix) fix=true ;;
+    --full) full=true ;;
     --args) args_json=$2; shift ;;
     *) echo "warmd: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -41,35 +39,42 @@ git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
 done
 
 body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
-  --argjson fix "$fix" --argjson args "$args_json" '$ARGS.positional as $profiles |
-  { repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, fix: $fix, args: $args, profiles: $profiles }' \
-  --args ${profiles[@]+"${profiles[@]}"})
-id=$(curl -fsS -X POST "$url/check" -H 'content-type: application/json' -d "$body" | jq -r .id)
+  --argjson full "$full" --argjson args "$args_json" \
+  '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, full: $full, args: $args }')
+ids=$(curl -fsS -X POST "$url/check" -H 'content-type: application/json' -d "$body")
+id=$(jq -r .id <<<"$ids")
+full_id=$(jq -r '.full_id // empty' <<<"$ids")
 echo "warmd: checking $repo $branch against ${base:0:7} (job $id)" >&2
 
-while :; do
-  job=$(curl -fsS "$url/jobs/$id")
-  state=$(jq -r .state <<<"$job")
-  [[ $state == "done" || $state == "failed" ]] && break
-  sleep 1
-done
+wait_job() {
+  local job state
+  while :; do
+    job=$(curl -fsS "$url/jobs/$1")
+    state=$(jq -r .state <<<"$job")
+    [[ $state == "done" || $state == "failed" ]] && break
+    sleep 1
+  done
+  jq -r '.phases | map("\(.name) \(.secs * 10 | floor / 10)s") | join(" · ")' <<<"$job" >&2
+  if [[ $state == "failed" ]]; then
+    jq -r .error <<<"$job" >&2
+    return 1
+  fi
+  printf '%s' "$job"
+}
 
-jq -r '.phases | map("\(.name) \(.secs * 10 | floor / 10)s") | join(" · ")' <<<"$job" >&2
-if [[ $state == failed ]]; then
-  jq -r .error <<<"$job" >&2
-  exit 1
-fi
+job=$(wait_job "$id")
 if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
   jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
   exit 1
 fi
 jq -r '.result.jobs[] | select((.new | length) > 0 or .output != null) |
   "== \(.name)\n" + (.new | map(.rendered) | join("")) + (.output // "")' <<<"$job"
-jq -r '.result.profiles | to_entries[] | select((.value | length) > 0) |
-  "== profile \(.key)\n" + (.value | map(.rendered) | join(""))' <<<"$job"
-if $fix; then
-  jq -r '.result.fix_patch // empty' <<<"$job" | git apply --allow-empty
-fi
 ok=$(jq -r .result.ok <<<"$job")
-[[ $ok == true ]] && echo "warmd: ok" >&2
+if [[ $ok == true ]]; then echo "warmd: CI ok" >&2; else echo "warmd: CI found issues (these must be fixed to merge)" >&2; fi
+
+if [[ -n $full_id ]]; then
+  echo "warmd: waiting for the full set (job $full_id, advisory)" >&2
+  fulljob=$(wait_job "$full_id")
+  jq -r '.result.full | "== full (advisory)\n" + .notice + "\n" + (.hits | map(.rendered) | join(""))' <<<"$fulljob"
+fi
 [[ $ok == true ]]

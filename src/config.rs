@@ -8,6 +8,10 @@ use anyhow::Context as _;
 use serde::{Deserialize, de::DeserializeOwned};
 use toml::from_str;
 
+pub(crate) const FULL_CLIPPY: &str = include_str!("full-clippy.toml");
+
+const FULL: &str = include_str!("full.toml");
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
@@ -20,6 +24,12 @@ pub(crate) struct Config {
     #[serde(default = "default_jobs_per_repo")]
     pub(crate) jobs_per_repo: u16,
     pub(crate) repos: BTreeMap<String, RepoCfg>,
+}
+
+impl Config {
+    pub(crate) fn load(dir: &Path) -> anyhow::Result<Self> {
+        read(&dir.join("repos.toml"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +75,7 @@ impl Job {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArgsOverride {
     #[serde(default)]
@@ -77,34 +87,26 @@ pub(crate) struct ArgsOverride {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Profile {
     pub(crate) steps: Vec<Step>,
-    pub(crate) repos: Option<Vec<String>>,
 }
 
 impl Profile {
-    pub(crate) fn applies_to(&self, repo: &str) -> bool {
-        self.repos.as_ref().is_none_or(|repos| repos.iter().any(|name| name == repo))
+    pub(crate) fn full() -> anyhow::Result<Self> {
+        from_str(FULL).context("parsing the built-in full profile")
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Step {
-    Clippy { targets: String, args: Vec<String>, conf_dir: Option<PathBuf> },
-    Slapslop { args: Vec<String> },
-}
-
-pub(crate) fn load(dir: &Path) -> anyhow::Result<(Config, BTreeMap<String, Profile>)> {
-    let config = read(&dir.join("repos.toml"))?;
-    let profiles_path = dir.join("profiles.toml");
-    let mut profiles: BTreeMap<String, Profile> =
-        if profiles_path.exists() { read(&profiles_path)? } else { BTreeMap::new() };
-    let root = fs::canonicalize(dir)?;
-    for step in profiles.values_mut().flat_map(|profile| &mut profile.steps) {
-        if let Step::Clippy { conf_dir: Some(conf), .. } = step {
-            *conf = root.join(&*conf);
-        }
-    }
-    Ok((config, profiles))
+    Clippy {
+        targets: String,
+        args: Vec<String>,
+        #[serde(default)]
+        recommended: bool,
+    },
+    Slapslop {
+        args: Vec<String>,
+    },
 }
 
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
