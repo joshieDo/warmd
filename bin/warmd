@@ -10,11 +10,13 @@ normalize() { sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#/$##'; }
 full=false
 args_json='{}'
 skip='[]'
+only='[]'
 while (($#)); do
   case $1 in
     check) ;;
     --full) full=true ;;
     --args) args_json=$2; shift ;;
+    --only) only=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$only"); shift ;;
     --skip) skip=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$skip"); shift ;;
     *) echo "warmd: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -41,8 +43,8 @@ git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
 done
 
 body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
-  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" \
-  '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip }')
+  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" \
+  '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip, only: $only }')
 ids=$(curl -fsS -X POST "$url/check" -H 'content-type: application/json' -d "$body")
 id=$(jq -r .id <<<"$ids")
 full_id=$(jq -r '.full_id // empty' <<<"$ids")
