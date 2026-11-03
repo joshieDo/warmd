@@ -47,8 +47,8 @@ poll_secs = 3600
 [repos.demo]
 url = "file://{root}/demo.git"
 jobs = [
-  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
-  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true }},
+  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", on_patch = "cargo clippy --all-targets {{packages}} --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
+  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', on_patch = 'cargo-slapslop run "$PWD" --all-lints --package {{packages_csv}}', slapslop = true }},
   {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
 ]
 "#,
@@ -183,7 +183,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(job["result"], json!({ "outcome": "rebase_needed", "files": ["src/lib.rs"] }));
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
-    assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
+    assert!(job["result"]["jobs"].as_array().unwrap().is_empty(), "{job:#}");
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");

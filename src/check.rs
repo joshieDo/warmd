@@ -55,6 +55,25 @@ pub(crate) struct Report {
     fix_patch: Option<String>,
 }
 
+impl Report {
+    fn summary(&self) -> String {
+        if self.ok {
+            return "ok".to_owned();
+        }
+        let jobs = self.jobs.iter().filter_map(|job| match (job.new.len(), &job.output) {
+            (0, Some(_)) => Some(format!("{} failed", job.name)),
+            (0, None) => None,
+            (count, _) => Some(format!("{} {count}", job.name)),
+        });
+        let profiles = self
+            .profiles
+            .iter()
+            .filter(|(_, hits)| !hits.is_empty())
+            .map(|(name, hits)| format!("{name} {}", hits.len()));
+        format!("found: {}", jobs.chain(profiles).collect::<Vec<_>>().join(", "))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub(crate) enum Outcome {
@@ -88,6 +107,70 @@ struct Metadata {
 struct Package {
     name: String,
     manifest_path: String,
+    dependencies: Vec<Dependency>,
+}
+
+#[derive(Deserialize)]
+struct Dependency {
+    name: String,
+}
+
+#[derive(Debug, Default)]
+struct Scope {
+    touched: BTreeSet<String>,
+    affected: BTreeSet<String>,
+    whole: bool,
+}
+
+impl Scope {
+    fn of(metadata: &str, root: &str, files: &BTreeSet<String>) -> anyhow::Result<Self> {
+        let metadata: Metadata = from_str(metadata).context("reading cargo metadata")?;
+        let dirs = metadata
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let manifest = package.manifest_path.strip_prefix(root)?.strip_prefix('/')?;
+                Some((manifest.strip_suffix("Cargo.toml")?, package.name.as_str()))
+            })
+            .collect::<Vec<_>>();
+        let owner = |file: &str| {
+            dirs.iter().filter(|(dir, _)| file.starts_with(dir)).max_by_key(|(dir, _)| dir.len()).map(|(_, name)| *name)
+        };
+        let mut scope = Self::default();
+        for file in files {
+            match owner(file) {
+                Some(name) => {
+                    scope.touched.insert(name.to_owned());
+                }
+                None => scope.whole = true,
+            }
+        }
+        scope.affected.clone_from(&scope.touched);
+        loop {
+            let dependents = metadata
+                .packages
+                .iter()
+                .filter(|package| !scope.affected.contains(&package.name))
+                .filter(|package| package.dependencies.iter().any(|dep| scope.affected.contains(&dep.name)))
+                .map(|package| package.name.clone())
+                .collect::<Vec<_>>();
+            if dependents.is_empty() {
+                return Ok(scope);
+            }
+            scope.affected.extend(dependents);
+        }
+    }
+
+    fn flags(names: &BTreeSet<String>) -> String {
+        names.iter().map(|name| format!("-p {name}")).collect::<Vec<_>>().join(" ")
+    }
+
+    fn command(&self, scoped: &str) -> Option<String> {
+        (!self.affected.is_empty()).then(|| {
+            let list = self.affected.iter().map(String::as_str).collect::<Vec<_>>().join(",");
+            scoped.replace("{packages}", &Self::flags(&self.affected)).replace("{packages_csv}", &list)
+        })
+    }
 }
 
 pub(crate) async fn run(
@@ -105,7 +188,7 @@ pub(crate) async fn run(
     }
     clock.mark("cleanup");
     let result = match &outcome {
-        Ok(Outcome::Checked(report)) => (if report.ok { "ok" } else { "found" }).to_owned(),
+        Ok(Outcome::Checked(report)) => report.summary(),
         Ok(Outcome::RebaseNeeded { .. }) => "rebase_needed".to_owned(),
         Ok(Outcome::SlapslopBaseline { .. }) => "baseline".to_owned(),
         Err(err) => format!("failed: {err:#}"),
@@ -179,22 +262,25 @@ async fn check(
 
     let added = diag::added_lines(&req.patch);
     let needs_crates = !extra.is_empty() || repo.cfg().jobs.iter().any(|job| job.on_patch.is_some());
-    let packages = if needs_crates {
+    let scope = if needs_crates {
         let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
-        let crates = touched_crates(&metadata.stdout, &sandbox::work_path(repo.name()), added.keys())?;
+        let scope = Scope::of(&metadata.stdout, &sandbox::work_path(repo.name()), &changed_files(&req.patch))?;
         clock.mark("metadata");
-        crates.iter().map(|krate| format!("-p {krate}")).collect::<Vec<_>>().join(" ")
+        scope
     } else {
-        String::new()
+        Scope::default()
     };
+    let packages = Scope::flags(&scope.touched);
 
     let all_jobs = &repo.cfg().jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
     for job in all_jobs {
         let cmd = match &job.on_patch {
-            None => job.cmd.clone(),
-            Some(_) if packages.is_empty() => continue,
-            Some(scoped) => scoped.replace("{packages}", &packages),
+            Some(scoped) if !scope.whole => match scope.command(scoped) {
+                Some(cmd) => cmd,
+                None => continue,
+            },
+            _ => job.cmd.clone(),
         };
         let (out, found) = sandbox.diagnose_cmd(job, &cmd).await?;
         let output = (!out.ok() && found.is_empty()).then(|| out.tail());
@@ -249,22 +335,10 @@ async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str
     }
 }
 
-fn touched_crates<'a>(
-    metadata: &str,
-    root: &str,
-    files: impl Iterator<Item = &'a String>,
-) -> anyhow::Result<BTreeSet<String>> {
-    let metadata: Metadata = from_str(metadata).context("reading cargo metadata")?;
-    let dirs = metadata
-        .packages
-        .iter()
-        .filter_map(|package| {
-            let manifest = package.manifest_path.strip_prefix(root)?.strip_prefix('/')?;
-            Some((manifest.strip_suffix("Cargo.toml")?, package.name.as_str()))
-        })
-        .collect::<Vec<_>>();
-    let owner = |file: &str| {
-        dirs.iter().filter(|(dir, _)| file.starts_with(dir)).max_by_key(|(dir, _)| dir.len()).map(|(_, name)| *name)
-    };
-    Ok(files.filter_map(|file| owner(file)).map(str::to_owned).collect())
+fn changed_files(patch: &str) -> BTreeSet<String> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("+++ b/").or_else(|| line.strip_prefix("--- a/")))
+        .map(str::to_owned)
+        .collect()
 }
