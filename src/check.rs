@@ -143,7 +143,7 @@ impl Report {
             return format!("ok{full}");
         }
         let jobs = self.jobs.iter().filter_map(|job| match (job.new.len(), &job.output) {
-            (0, Some(_)) => Some(format!("{} failed", job.name)),
+            (0, Some(_)) => Some(format!("{} interrupted", job.name)),
             (0, None) => None,
             (count, _) => Some(format!("{} {count}", job.name)),
         });
