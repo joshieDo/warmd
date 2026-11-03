@@ -22,13 +22,15 @@ use tokio::{
 };
 
 use crate::{
-    config::RepoCfg,
+    config::{Job, RepoCfg},
     diag::Diag,
     metrics::{self, Clock, Phase},
     sandbox::{Sandbox, Tree},
 };
 
 type Baseline = BTreeMap<String, Vec<Diag>>;
+
+type Parts = BTreeMap<&'static str, u64>;
 
 #[derive(Debug)]
 pub(crate) struct Repo {
@@ -107,6 +109,30 @@ impl Repo {
         Ok(self.slots.acquire().await?)
     }
 
+    fn label(&self, parts: &Parts) -> Vec<Part> {
+        let jobs = &self.cfg.jobs;
+        let names = |keep: &dyn Fn(&Job) -> bool| {
+            jobs.iter().filter(|job| keep(job)).map(|job| job.name.clone()).collect::<Vec<_>>()
+        };
+        let mut labeled = parts
+            .iter()
+            .map(|(bucket, bytes)| {
+                let names = match *bucket {
+                    "cargo" => names(&|job| !job.slapslop && !job.cmd.contains(" fmt")),
+                    "slapslop" => names(&|job| job.slapslop),
+                    "release" => names(&|job| job.cmd.contains("--release")),
+                    other => vec![other.to_owned()],
+                };
+                Part { jobs: names, bytes: *bytes }
+            })
+            .collect::<Vec<_>>();
+        let idle = names(&|job| !labeled.iter().any(|part| part.jobs.contains(&job.name)));
+        if !idle.is_empty() {
+            labeled.push(Part { jobs: idle, bytes: 0 });
+        }
+        labeled
+    }
+
     pub(crate) fn current(&self) -> Option<Arc<Gen>> {
         self.gens().last().cloned()
     }
@@ -135,7 +161,16 @@ impl Repo {
                 let bytes = Some(generation.bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0);
                 let own_bytes =
                     (index < newest).then(|| generation.own_bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0);
-                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs, bytes, own_bytes }
+                let source = if index < newest { &generation.own_parts } else { &generation.parts };
+                let parts = self.label(&source.lock().unwrap_or_else(PoisonError::into_inner));
+                GenView {
+                    sha: generation.sha.clone(),
+                    age_secs: age.as_secs(),
+                    expires_in_secs,
+                    bytes,
+                    own_bytes,
+                    parts,
+                }
             })
             .collect::<Vec<GenView>>();
         let current = gens.last().map(|generation| generation.sha.clone());
@@ -229,6 +264,8 @@ impl Repo {
             born: SystemTime::now(),
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),
+            parts: Mutex::default(),
+            own_parts: Mutex::default(),
         })
     }
 
@@ -276,6 +313,8 @@ pub(crate) struct Gen {
     born: SystemTime,
     bytes: AtomicU64,
     own_bytes: AtomicU64,
+    parts: Mutex<Parts>,
+    own_parts: Mutex<Parts>,
 }
 
 impl Gen {
@@ -299,6 +338,12 @@ pub(crate) struct View {
     gens: Vec<GenView>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct Part {
+    jobs: Vec<String>,
+    bytes: u64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct FileMeta {
     size: u64,
@@ -312,6 +357,7 @@ struct GenView {
     expires_in_secs: Option<u64>,
     bytes: Option<u64>,
     own_bytes: Option<u64>,
+    parts: Vec<Part>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -356,15 +402,35 @@ pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
 }
 
 async fn measure_own(older: Arc<Gen>, newer: Arc<Gen>) {
-    match own_bytes(&older.dir, &newer.dir).await {
-        Ok(bytes) => older.own_bytes.store(bytes, Ordering::Relaxed),
+    match own_parts(&older.dir, &newer.dir).await {
+        Ok(parts) => {
+            older.own_bytes.store(parts.values().sum(), Ordering::Relaxed);
+            *older.own_parts.lock().unwrap_or_else(PoisonError::into_inner) = parts;
+        }
         Err(err) => eprintln!("warmd: comparing {} with {}: {err:#}", older.sha, newer.sha),
     }
 }
 
-async fn own_bytes(older: &Path, newer: &Path) -> anyhow::Result<u64> {
+async fn own_parts(older: &Path, newer: &Path) -> anyhow::Result<Parts> {
     let (old_files, new_files) = (file_index(older).await?, file_index(newer).await?);
-    Ok(old_files.iter().filter(|(path, meta)| new_files.get(*path) != Some(meta)).map(|(_, meta)| meta.size).sum())
+    Ok(bucketize(old_files.iter().filter(|(path, meta)| new_files.get(*path) != Some(*meta))))
+}
+
+fn bucketize<'a>(files: impl Iterator<Item = (&'a String, &'a FileMeta)>) -> Parts {
+    let mut parts = Parts::new();
+    for (path, meta) in files {
+        let bucket = if path.starts_with("target/slapslop/") {
+            "slapslop"
+        } else if path.starts_with("target/release/") {
+            "release"
+        } else if path.starts_with("target/") {
+            "cargo"
+        } else {
+            "source"
+        };
+        *parts.entry(bucket).or_default() += meta.size;
+    }
+    parts
 }
 
 async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
@@ -381,8 +447,12 @@ async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
 }
 
 async fn measure(generation: Arc<Gen>) {
-    match dir_bytes(&generation.dir).await {
-        Ok(bytes) => generation.bytes.store(bytes, Ordering::Relaxed),
+    match file_index(&generation.dir).await {
+        Ok(files) => {
+            let parts = bucketize(files.iter());
+            generation.bytes.store(parts.values().sum(), Ordering::Relaxed);
+            *generation.parts.lock().unwrap_or_else(PoisonError::into_inner) = parts;
+        }
         Err(err) => eprintln!("warmd: measuring {}: {err:#}", generation.dir.display()),
     }
 }
@@ -405,6 +475,8 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
             born,
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),
+            parts: Mutex::default(),
+            own_parts: Mutex::default(),
         }));
     }
     gens.sort_by_key(|generation| generation.born);

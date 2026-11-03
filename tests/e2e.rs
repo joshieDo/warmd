@@ -217,6 +217,12 @@ fn checks_patches_against_warm_generations() {
     until(|| {
         curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][0]["own_bytes"].is_u64()
     });
+    let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
+    let parts = stats["repos"][0]["view"]["gens"][1]["parts"].as_array().unwrap();
+    let jobs_of = |bucket: &str| parts.iter().find(|part| part["jobs"][0] == bucket).map(|part| part["jobs"].clone());
+    assert_eq!(jobs_of("clippy"), Some(json!(["clippy"])), "{parts:#?}");
+    assert_eq!(jobs_of("slapslop"), Some(json!(["slapslop"])), "{parts:#?}");
+    assert_eq!(jobs_of("fmt").unwrap(), json!(["fmt"]), "{parts:#?}");
     assert_eq!(stats["repos"][0]["url"], json!(format!("file://{}/demo", warmd.root.display())));
     assert!(sh(&warmd.root, &format!("curl -sf {}/", warmd.url)).contains("/stats"));
     let metrics = fs::read_to_string(warmd.root.join("state/demo/metrics.jsonl")).unwrap();

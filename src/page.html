@@ -50,6 +50,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .tree ul li::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; border-left: 1px solid var(--line); }
 .tree ul li::after { content: ""; position: absolute; left: 0; top: 13px; width: 10px; border-top: 1px solid var(--line); }
 .node { font-weight: 500; }
+.parts { margin: 4px 0 0; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -79,6 +80,7 @@ const bar = p => '<div class="bar"><div style="width:' + Math.min(p, 100).toFixe
 const dot = s => '<span class="dot ' + esc(s) + '"></span>';
 let last = null, open = null;
 const size = b => b == null ? "…" : gb(b);
+const parts = g => (g.parts || []).map(p => '<span class="chip">[' + p.jobs.map(esc).join(", ") + '] ' + gb(p.bytes) + '</span>').join("");
 function tree(i) {
   open = i;
   const r = last.repos[i], gens = [...r.view.gens].reverse();
@@ -87,7 +89,7 @@ function tree(i) {
   const node = (label, meta, cls) => '<li><span class="node">' + (cls ? dot(cls) : "") + label + '</span> <span class="muted">' + meta + '</span>';
   const checkNode = c => {
     const f = c.fields, res = String(f.result ?? "");
-    const name = f.branch ? esc(f.branch) : 'base <code>' + esc(String(f.base ?? "").slice(0, 7)) + '</code>';
+    const name = f.branch ? esc(f.branch) : f.base ? 'base <code>' + esc(String(f.base).slice(0, 7)) + '</code>' : 'check';
     const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
     return node(name, esc(res.slice(0, 80)) + ' · ' + size(f.layer_bytes) + ' · ' + dur(c.total_secs) + ' · ' + ago(c.at), cls) + '</li>';
   };
@@ -96,11 +98,11 @@ function tree(i) {
     own.forEach(c => shown.add(c));
     const label = (n === 0 ? '<b>main</b> ' : '') + '<code>' + esc(g.sha.slice(0, 7)) + '</code>';
     const meta = (n === 0 ? size(g.bytes) : '+' + size(g.own_bytes) + ' · TTL ' + dur(g.expires_in_secs)) + ' · ' + dur(g.age_secs) + ' old';
-    return node(label, meta, n === 0 ? "ready" : "") + (own.length ? '<ul>' + own.map(checkNode).join("") + '</ul>' : "") + '</li>';
+    return node(label, meta, n === 0 ? "ready" : "") + '<div class="parts">' + parts(g) + '</div>' + (own.length ? '<ul>' + own.map(checkNode).join("") + '</ul>' : "") + '</li>';
   }).join("");
   const other = checks.filter(c => !shown.has(c));
   $("modal-title").textContent = r.name;
-  $("modal-body").innerHTML = '<ul class="tree">' + items + '</ul>' + (other.length ? '<h2 style="margin-top:20px">Not on a kept generation</h2><ul class="tree">' + other.map(checkNode).join("") + '</ul>' : "");
+  $("modal-body").innerHTML = '<ul class="tree">' + items + '</ul>' + (other.length ? '<h2 style="margin-top:20px">Checks on deleted builds</h2><ul class="tree">' + other.map(checkNode).join("") + '</ul>' : "");
   $("modal").hidden = false;
 }
 function closeTree() { open = null; $("modal").hidden = true; }
