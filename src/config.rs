@@ -44,6 +44,8 @@ pub(crate) struct Job {
     pub(crate) args: String,
     #[serde(default)]
     pub(crate) slapslop: bool,
+    #[serde(default)]
+    pub(crate) warm_only: bool,
 }
 
 impl Job {

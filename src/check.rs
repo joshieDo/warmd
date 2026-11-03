@@ -304,7 +304,7 @@ async fn check(
 
     let all_jobs = &cfg.jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
-    for job in all_jobs {
+    for job in all_jobs.iter().filter(|job| !job.warm_only) {
         let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
                 Some(cmd) => cmd,
