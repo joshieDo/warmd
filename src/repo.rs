@@ -463,7 +463,7 @@ pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
 }
 
 pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
-    Ok(checked(Command::new("du").arg("-sb").arg(path))
+    Ok(checked_quiet(Command::new("du").arg("-sb").arg(path))
         .await?
         .split_whitespace()
         .next()
@@ -475,8 +475,8 @@ pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     if symlink_metadata(path).await.is_err() {
         return Ok(());
     }
-    checked(Command::new("chmod").arg("-R").arg("u+rwX").arg(path)).await?;
-    checked(Command::new("rm").arg("-rf").arg(path)).await?;
+    checked_quiet(Command::new("chmod").arg("-R").arg("u+rwX").arg(path)).await?;
+    checked_quiet(Command::new("rm").arg("-rf").arg(path)).await?;
     Ok(())
 }
 
@@ -514,7 +514,7 @@ fn bucketize<'a>(files: impl Iterator<Item = (&'a String, &'a FileMeta)>) -> Par
 }
 
 async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
-    Ok(checked(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"]))
+    Ok(checked_quiet(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"]))
         .await?
         .lines()
         .filter_map(|line| {
@@ -571,6 +571,10 @@ async fn checked(cmd: &mut Command) -> anyhow::Result<String> {
     metrics::note_command(
         &once(std.get_program()).chain(std.get_args()).map(OsStr::to_string_lossy).collect::<Vec<_>>().join(" "),
     );
+    checked_quiet(cmd).await
+}
+
+async fn checked_quiet(cmd: &mut Command) -> anyhow::Result<String> {
     let out = cmd.output().await.with_context(|| format!("starting {:?}", cmd.as_std()))?;
     if !out.status.success() {
         bail!("{:?} failed: {}", cmd.as_std(), String::from_utf8_lossy(&out.stderr).trim());

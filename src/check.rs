@@ -403,7 +403,8 @@ async fn check(
         ensure!(committed.ok(), "committing the patch: {}", committed.stderr.trim());
     } else {
         let synced = sandbox
-            .run(
+            .run_described(
+                &format!("git apply --cached  # patch onto {}, rewriting only changed files", &generation.sha()[..7]),
                 &(SYNC_TREE
                     .replace("{gen}", generation.sha())
                     .replace("{apply}", if req.patch.trim().is_empty() { "false" } else { "true" })),

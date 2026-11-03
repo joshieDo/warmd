@@ -2,23 +2,85 @@
 set -euo pipefail
 
 url=${WARMD_URL:-http://dev-joshie.tail388b2e.ts.net:7878}
-root=$(git rev-parse --show-toplevel)
-cd "$root"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON] [--wait]
+       warmd track [JOB_ID]
+EOF
+  exit 2
+}
 
 normalize() { sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#/$##'; }
+last_file() { printf '%s/warmd-last' "$(git rev-parse --git-dir)"; }
 
-full=false
-args_json='{}'
-skip='[]'
-only='[]'
+wait_job() {
+  local job state
+  while :; do
+    job=$(curl -fsS "$url/jobs/$1")
+    state=$(jq -r .state <<<"$job")
+    [[ $state == "done" || $state == "failed" ]] && break
+    sleep 1
+  done
+  jq -r '.phases | map("\(.name) \(.secs * 10 | floor / 10)s") | join(" · ")' <<<"$job" >&2
+  if [[ $state == "failed" ]]; then
+    jq -r .error <<<"$job" >&2
+    return 1
+  fi
+  printf '%s' "$job"
+}
+
+track() {
+  local id=$1 full_id=${2:-} job ok fulljob
+  echo "warmd: waiting for job $id" >&2
+  job=$(wait_job "$id")
+  if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
+    jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
+    return 1
+  fi
+  jq -r '.result.jobs[] | select((.new | length) > 0 or .output != null) |
+    "== \(.name)\n" + (.new | map(.rendered) | join("")) + (.output // "")' <<<"$job"
+  ok=$(jq -r .result.ok <<<"$job")
+  if [[ $ok == true ]]; then echo "warmd: CI ok" >&2; else echo "warmd: CI found issues (these must be fixed to merge)" >&2; fi
+  if [[ -n $full_id ]]; then
+    echo "warmd: waiting for the full set (job $full_id, advisory)" >&2
+    fulljob=$(wait_job "$full_id")
+    jq -r '.result.full | "== full (advisory)\n" + .notice + "\n" + (.hits | map(.rendered) | join(""))' <<<"$fulljob"
+  fi
+  [[ $ok == true ]]
+}
+
+cmd=${1:-}
+[[ -n $cmd ]] || usage
+shift
+
+case $cmd in
+  track)
+    if [[ $# -gt 0 ]]; then
+      id=$1
+      full_id=${2:-}
+    else
+      [[ -s $(last_file) ]] || { echo "warmd: no job to track here; run warmd check first" >&2; exit 2; }
+      read -r id full_id <"$(last_file)" || true
+    fi
+    track "$id" "${full_id:-}"
+    exit $?
+    ;;
+  check) ;;
+  *) usage ;;
+esac
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+full=false wait=false args_json='{}' skip='[]' only='[]'
 while (($#)); do
   case $1 in
-    check) ;;
     --full) full=true ;;
+    --wait) wait=true ;;
     --args) args_json=$2; shift ;;
     --only) only=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$only"); shift ;;
     --skip) skip=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$skip"); shift ;;
-    *) echo "warmd: unknown argument $1" >&2; exit 2 ;;
+    *) echo "warmd: unknown argument $1" >&2; usage ;;
   esac
   shift
 done
@@ -48,37 +110,16 @@ body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfi
 ids=$(curl -fsS -X POST "$url/check" -H 'content-type: application/json' -d "$body")
 id=$(jq -r .id <<<"$ids")
 full_id=$(jq -r '.full_id // empty' <<<"$ids")
-echo "warmd: checking $repo $branch against ${base:0:7} (job $id)" >&2
+printf '%s %s\n' "$id" "$full_id" >"$(last_file)"
 
-wait_job() {
-  local job state
-  while :; do
-    job=$(curl -fsS "$url/jobs/$1")
-    state=$(jq -r .state <<<"$job")
-    [[ $state == "done" || $state == "failed" ]] && break
-    sleep 1
-  done
-  jq -r '.phases | map("\(.name) \(.secs * 10 | floor / 10)s") | join(" · ")' <<<"$job" >&2
-  if [[ $state == "failed" ]]; then
-    jq -r .error <<<"$job" >&2
-    return 1
+echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}"
+if ! $wait; then
+  if [[ -n $(git status --porcelain) ]]; then
+    echo "warmd: commit and push now so CI starts in parallel: git commit -am '...' && git push -u origin $branch"
+  elif [[ $branch != HEAD ]] && ! git diff --quiet "@{upstream}" 2>/dev/null; then
+    echo "warmd: push now so CI starts in parallel: git push -u origin $branch"
   fi
-  printf '%s' "$job"
-}
-
-job=$(wait_job "$id")
-if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
-  jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
-  exit 1
+  echo "warmd: then get the result with: warmd track $id${full_id:+ $full_id}"
+  exit 0
 fi
-jq -r '.result.jobs[] | select((.new | length) > 0 or .output != null) |
-  "== \(.name)\n" + (.new | map(.rendered) | join("")) + (.output // "")' <<<"$job"
-ok=$(jq -r .result.ok <<<"$job")
-if [[ $ok == true ]]; then echo "warmd: CI ok" >&2; else echo "warmd: CI found issues (these must be fixed to merge)" >&2; fi
-
-if [[ -n $full_id ]]; then
-  echo "warmd: waiting for the full set (job $full_id, advisory)" >&2
-  fulljob=$(wait_job "$full_id")
-  jq -r '.result.full | "== full (advisory)\n" + .notice + "\n" + (.hits | map(.rendered) | join(""))' <<<"$fulljob"
-fi
-[[ $ok == true ]]
+track "$id" "$full_id"

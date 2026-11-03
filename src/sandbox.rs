@@ -30,6 +30,15 @@ pub(crate) struct Sandbox<'a> {
 
 impl Sandbox<'_> {
     pub(crate) async fn run(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
+        self.run_described(cmd, cmd, stdin).await
+    }
+
+    pub(crate) async fn run_described(self, label: &str, script: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
+        metrics::note_command(label);
+        self.run_quiet(script, stdin).await
+    }
+
+    async fn run_quiet(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
         for attempt in 1..=MOUNT_ATTEMPTS {
             let out = self.run_once(cmd, stdin).await?;
             if !out.stderr.starts_with("bwrap: Can't make overlay mount") || attempt == MOUNT_ATTEMPTS {
@@ -41,7 +50,6 @@ impl Sandbox<'_> {
     }
 
     async fn run_once(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
-        metrics::note_command(cmd);
         let home = env::var_os("HOME").map(PathBuf::from).context("HOME is unset")?;
         let cargo_home = env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
         let rustup_home = env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
@@ -108,10 +116,12 @@ impl Sandbox<'_> {
     }
 
     pub(crate) async fn slapslop(self, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
-        let out = self.run(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl && {cmd}"), None).await?;
+        let out = self.run_described(cmd, &format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl && {cmd}"), None).await?;
         Ok((
             out,
-            diag::parse(&self.run(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl 2>/dev/null || true"), None).await?.stdout),
+            diag::parse(
+                &self.run_quiet(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl 2>/dev/null || true"), None).await?.stdout,
+            ),
         ))
     }
 }
