@@ -175,7 +175,9 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
         let last_build = history.iter().rev().find(|record| record["kind"] == "build").cloned();
         let checks = history.into_iter().filter(|record| record["kind"] != "build").collect::<Vec<_>>();
         recent.extend(checks.iter().cloned());
-        repos.push(json!({ "name": name, "view": repo.view(), "last_build": last_build, "checks": checks }));
+        let url = repo.cfg().url.trim_end_matches(".git");
+        repos
+            .push(json!({ "name": name, "url": url, "view": repo.view(), "last_build": last_build, "checks": checks }));
     }
     recent.sort_by_key(|record| Reverse(record["at"].as_u64()));
     recent.truncate(RECENT_JOBS);

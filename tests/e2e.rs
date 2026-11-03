@@ -204,6 +204,10 @@ fn checks_patches_against_warm_generations() {
     until(|| {
         curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][1]["bytes"].is_u64()
     });
+    until(|| {
+        curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][0]["own_bytes"].is_u64()
+    });
+    assert_eq!(stats["repos"][0]["url"], json!(format!("file://{}/demo", warmd.root.display())));
     assert!(sh(&warmd.root, &format!("curl -sf {}/", warmd.url)).contains("/stats"));
     let metrics = fs::read_to_string(warmd.root.join("state/demo/metrics.jsonl")).unwrap();
     let kinds = metrics.lines().map(|line| from_str::<Value>(line).unwrap()["kind"].clone()).collect::<Vec<_>>();

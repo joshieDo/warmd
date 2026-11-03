@@ -38,7 +38,7 @@ code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; 
 .cores > div { flex: 1; height: 100%; background: var(--fill); border-radius: 1px; display: flex; align-items: flex-end; }
 .cores > div > div { width: 100%; background: var(--text); border-radius: 1px; }
 .chip { display: inline-block; padding: 1px 6px; border-radius: 6px; background: var(--fill); margin: 0 4px 4px 0; }
-tr.click { cursor: pointer; } tr.click:hover td { background: var(--fill); }
+tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decoration: underline; } tr.click:hover td { background: var(--fill); }
 #modal { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; }
 #modal[hidden] { display: none; }
 .sheet { width: 80vw; height: 80vh; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; overflow: auto; }
@@ -56,7 +56,7 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--fill); }
 <main>
   <header><h1>warmd</h1><span class="muted" id="updated"></span></header>
   <section class="grid" id="machine"></section>
-  <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Generations and TTL</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
+  <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Main</th><th>Disk</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
   <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
 </main>
 <div id="modal" hidden><div class="sheet"><header><h1 id="modal-title"></h1><button id="modal-close">✕</button></header><div id="modal-body"></div></div></div>
@@ -79,9 +79,6 @@ const bar = p => '<div class="bar"><div style="width:' + Math.min(p, 100).toFixe
 const dot = s => '<span class="dot ' + esc(s) + '"></span>';
 let last = null, open = null;
 const size = b => b == null ? "…" : gb(b);
-const genChip = g => g.expires_in_secs == null
-  ? '<span class="chip"><b>main</b> <code>' + esc(g.sha.slice(0, 7)) + '</code> · ' + size(g.bytes) + ' · ' + dur(g.age_secs) + ' old</span>'
-  : '<span class="chip"><code>' + esc(g.sha.slice(0, 7)) + '</code> TTL ' + dur(g.expires_in_secs) + ' · ' + dur(g.age_secs) + ' old</span>';
 function tree(i) {
   open = i;
   const r = last.repos[i], gens = [...r.view.gens].reverse();
@@ -98,7 +95,7 @@ function tree(i) {
     const own = checks.filter(c => c.fields.ran_on === g.sha);
     own.forEach(c => shown.add(c));
     const label = (n === 0 ? '<b>main</b> ' : '') + '<code>' + esc(g.sha.slice(0, 7)) + '</code>';
-    const meta = (n === 0 ? size(g.bytes) : 'TTL ' + dur(g.expires_in_secs)) + ' · ' + dur(g.age_secs) + ' old';
+    const meta = (n === 0 ? size(g.bytes) : '+' + size(g.own_bytes) + ' · TTL ' + dur(g.expires_in_secs)) + ' · ' + dur(g.age_secs) + ' old';
     return node(label, meta, n === 0 ? "ready" : "") + (own.length ? '<ul>' + own.map(checkNode).join("") + '</ul>' : "") + '</li>';
   }).join("");
   const other = checks.filter(c => !shown.has(c));
@@ -124,9 +121,12 @@ async function load() {
   last = s;
   $("repos").innerHTML = s.repos.map((r, i) => {
     const v = r.view, st = v.status, b = r.last_build;
-    const gens = [...v.gens].reverse().map(genChip).join("");
+    const main = v.gens[v.gens.length - 1];
+    const link = main ? (/^https:/.test(r.url) ? '<a href="' + esc(r.url) + '/commit/' + esc(main.sha) + '" target="_blank" onclick="event.stopPropagation()"><code>' + esc(main.sha.slice(0, 7)) + '</code></a>' : '<code>' + esc(main.sha.slice(0, 7)) + '</code>') + ' <span class="muted">' + dur(main.age_secs) + ' old</span>' : '<span class="muted">none</span>';
+    const total = v.gens.reduce((sum, g) => sum + (g.expires_in_secs == null ? g.bytes || 0 : g.own_bytes || 0), 0);
+    const disk = main ? size(main.bytes) + (v.gens.length > 1 ? ' <span class="muted">· ' + gb(total) + ' with ' + (v.gens.length - 1) + ' older</span>' : '') : '–';
     const build = b ? dur(b.total_secs) + ' <span class="muted">' + ago(b.at) + (b.fields.ok ? "" : " · failed") + '</span>' : '<span class="muted">–</span>';
-    return '<tr class="click" data-repo="' + i + '"><td><b>' + esc(r.name) + '</b></td><td>' + dot(st.state) + esc(st.state) + (st.error ? '<div class="muted">' + esc(st.error.slice(-160)) + '</div>' : "") + '</td><td>' + (gens || '<span class="muted">none</span>') + '</td><td>' + build + '</td></tr>';
+    return '<tr class="click" data-repo="' + i + '"><td><b>' + esc(r.name) + '</b></td><td>' + dot(st.state) + esc(st.state) + (st.error ? '<div class="muted">' + esc(st.error.slice(-160)) + '</div>' : "") + '</td><td>' + link + '</td><td>' + disk + '</td><td>' + build + '</td></tr>';
   }).join("");
   if (open != null) tree(open);
   $("jobs").innerHTML = s.recent.map(j => {

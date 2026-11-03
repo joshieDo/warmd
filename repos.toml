@@ -39,3 +39,27 @@ jobs = [
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true },
   { name = "fmt", cmd = "cargo fmt --check", on_patch = "cargo fmt --check {packages}" },
 ]
+
+[repos.evm2]
+url = "https://github.com/alloy-rs/evm2"
+clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --message-format=json"
+jobs = [
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --workspace --all-targets --all-features --message-format=json" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
+]
+
+[repos.solar]
+url = "https://github.com/paradigmxyz/solar"
+clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --message-format=json"
+jobs = [
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --workspace --all-targets --message-format=json" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
+]
+
+[repos.alloy]
+url = "https://github.com/alloy-rs/alloy"
+clippy = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --message-format=json"
+jobs = [
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --workspace --all-targets --all-features --message-format=json" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
+]

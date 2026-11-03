@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -60,6 +60,11 @@ impl Repo {
         let gens = adopt(&gens_dir)?;
         for generation in &gens {
             spawn(measure(Arc::clone(generation)));
+        }
+        for pair in gens.windows(2) {
+            if let [older, newer] = pair {
+                spawn(measure_own(Arc::clone(older), Arc::clone(newer)));
+            }
         }
         let metrics_file = state_dir.join(&name).join("metrics.jsonl");
         let status = Status {
@@ -128,7 +133,9 @@ impl Repo {
                 });
                 let expires_in_secs = (index < newest).then(|| self.keep.saturating_sub(age).as_secs());
                 let bytes = Some(generation.bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0);
-                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs, bytes }
+                let own_bytes =
+                    (index < newest).then(|| generation.own_bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0);
+                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs, bytes, own_bytes }
             })
             .collect::<Vec<GenView>>();
         let current = gens.last().map(|generation| generation.sha.clone());
@@ -163,6 +170,9 @@ impl Repo {
                 Ok(generation) => {
                     let generation = Arc::new(generation);
                     spawn(measure(Arc::clone(&generation)));
+                    if let Some(previous) = self.current() {
+                        spawn(measure_own(previous, Arc::clone(&generation)));
+                    }
                     self.gens().push(generation);
                     self.set_status(State::Ready, &head, None, phases);
                 }
@@ -212,7 +222,14 @@ impl Repo {
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         clock.mark("save");
-        Ok(Gen { sha: sha.to_owned(), dir, baseline, born: SystemTime::now(), bytes: AtomicU64::new(0) })
+        Ok(Gen {
+            sha: sha.to_owned(),
+            dir,
+            baseline,
+            born: SystemTime::now(),
+            bytes: AtomicU64::new(0),
+            own_bytes: AtomicU64::new(0),
+        })
     }
 
     async fn prune(&self, keep: Duration) -> anyhow::Result<()> {
@@ -258,6 +275,7 @@ pub(crate) struct Gen {
     baseline: Baseline,
     born: SystemTime,
     bytes: AtomicU64,
+    own_bytes: AtomicU64,
 }
 
 impl Gen {
@@ -281,12 +299,19 @@ pub(crate) struct View {
     gens: Vec<GenView>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FileMeta {
+    size: u64,
+    mtime: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct GenView {
     sha: String,
     age_secs: u64,
     expires_in_secs: Option<u64>,
     bytes: Option<u64>,
+    own_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -330,6 +355,31 @@ pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn measure_own(older: Arc<Gen>, newer: Arc<Gen>) {
+    match own_bytes(&older.dir, &newer.dir).await {
+        Ok(bytes) => older.own_bytes.store(bytes, Ordering::Relaxed),
+        Err(err) => eprintln!("warmd: comparing {} with {}: {err:#}", older.sha, newer.sha),
+    }
+}
+
+async fn own_bytes(older: &Path, newer: &Path) -> anyhow::Result<u64> {
+    let (old_files, new_files) = (file_index(older).await?, file_index(newer).await?);
+    Ok(old_files.iter().filter(|(path, meta)| new_files.get(*path) != Some(meta)).map(|(_, meta)| meta.size).sum())
+}
+
+async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
+    let out = checked(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"])).await?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let path = fields.next()?.to_owned();
+            let size = fields.next()?.parse().ok()?;
+            Some((path, FileMeta { size, mtime: fields.next()?.to_owned() }))
+        })
+        .collect())
+}
+
 async fn measure(generation: Arc<Gen>) {
     match dir_bytes(&generation.dir).await {
         Ok(bytes) => generation.bytes.store(bytes, Ordering::Relaxed),
@@ -348,7 +398,14 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
         }
         let baseline = from_slice(&fs::read(&path)?)?;
         let born = fs::metadata(&path)?.modified()?;
-        gens.push(Arc::new(Gen { sha: sha.to_owned(), dir, baseline, born, bytes: AtomicU64::new(0) }));
+        gens.push(Arc::new(Gen {
+            sha: sha.to_owned(),
+            dir,
+            baseline,
+            born,
+            bytes: AtomicU64::new(0),
+            own_bytes: AtomicU64::new(0),
+        }));
     }
     gens.sort_by_key(|generation| generation.born);
     Ok(gens)
