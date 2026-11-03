@@ -185,8 +185,7 @@ async fn memory() -> anyhow::Result<(u64, u64)> {
 
 fn meminfo_field(text: &str, name: &str) -> anyhow::Result<u64> {
     let rest = text.lines().find_map(|line| line.strip_prefix(name)).ok_or_else(|| missing(name))?;
-    let kib = rest.split_whitespace().next().ok_or_else(|| missing(name))?.parse::<u64>()?;
-    Ok(kib * 1024)
+    Ok(rest.split_whitespace().next().ok_or_else(|| missing(name))?.parse::<u64>()? * 1024)
 }
 
 async fn load_average() -> anyhow::Result<Vec<f64>> {

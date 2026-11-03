@@ -58,6 +58,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
   <header><h1>warmd</h1><span class="muted" id="updated"></span></header>
   <section class="grid" id="machine"></section>
   <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Main</th><th>Disk</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
+  <section class="card"><h2>Running now</h2><table><thead><tr><th>Since</th><th>Repo</th><th>Commit</th><th>Kind</th><th>Branch</th><th>State</th></tr></thead><tbody id="live"></tbody></table></section>
   <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Commit</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
 </main>
 <div id="modal" hidden><div class="sheet"><header><h1 id="modal-title"></h1><button id="modal-close">✕</button></header><div id="modal-body"></div></div></div>
@@ -131,6 +132,14 @@ async function load() {
     return '<tr class="click" data-repo="' + i + '"><td><b>' + esc(r.name) + '</b></td><td>' + dot(st.state) + esc(st.state) + (st.error ? '<div class="muted">' + esc(st.error.slice(-160)) + '</div>' : "") + '</td><td>' + link + '</td><td>' + disk + '</td><td>' + build + '</td></tr>';
   }).join("");
   if (open != null) tree(open);
+  const commitLink = (repoName, sha, dirty) => {
+    const repo = last.repos.find(r => r.name === repoName);
+    const label = '<code>' + esc(String(sha).slice(0, 7)) + (dirty ? '-dirty' : '') + '</code>';
+    return sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
+  };
+  const liveRows = (s.building || []).map(b => '<tr><td class="muted">' + dur(Date.now() / 1000 - b.started) + '</td><td>' + esc(b.repo) + '</td><td>' + commitLink(b.repo, b.sha, false) + '</td><td>build</td><td class="muted">main</td><td>' + dot("refreshing") + 'building</td></tr>')
+    .concat((s.live || []).map(j => '<tr><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + commitLink(j.repo, j.base, true) + '</td><td>' + esc(j.kind) + '</td><td>' + esc(j.branch || "–") + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
+  $("live").innerHTML = liveRows.join("") || '<tr><td colspan="6" class="muted">Nothing running</td></tr>';
   $("jobs").innerHTML = s.recent.map(j => {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
     const res = String(j.fields.result ?? (j.kind === "build" ? (j.fields.ok ? "built" : "failed") : j.fields.ok ? "ok" : "failed"));

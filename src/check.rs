@@ -66,6 +66,24 @@ impl Request {
         &self.repo
     }
 
+    pub(crate) const fn kind(&self) -> &'static str {
+        if self.baseline_only {
+            "slapslop_baseline"
+        } else if self.full_only {
+            "full"
+        } else {
+            "check"
+        }
+    }
+
+    pub(crate) fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    pub(crate) fn base_sha(&self) -> &str {
+        &self.base.sha
+    }
+
     pub(crate) const fn wants_full(&self) -> bool {
         self.full
     }
@@ -235,13 +253,7 @@ pub(crate) async fn run(
     running: impl FnOnce(),
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
-    let kind = if req.baseline_only {
-        "slapslop_baseline"
-    } else if req.full_only {
-        "full"
-    } else {
-        "check"
-    };
+    let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
     let (layer, session_guard) = match req.session.clone().filter(|_| !req.full_only) {
         Some(name) => {
@@ -360,8 +372,7 @@ async fn check(
     }
 
     let added = diag::added_lines(&req.patch);
-    let needs_crates = req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some());
-    let scope = if needs_crates {
+    let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some()) {
         let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
         let scope = Scope::of(&metadata.stdout, &sandbox::work_path(repo.name()), &changed_files(&req.patch))?;
         clock.mark("metadata");

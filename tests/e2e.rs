@@ -150,6 +150,8 @@ fn checks_patches_against_warm_generations() {
         "branch": "feat/first",
     });
     let ids = curl("POST", &format!("{}/check", warmd.url), Some(&body)).unwrap();
+    let live = curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["live"].clone();
+    assert!(live.as_array().unwrap().iter().any(|job| job["kind"] == "full"), "{live:#}");
     let job = warmd.wait(ids["id"].as_str().unwrap());
     let full_job = warmd.wait(ids["full_id"].as_str().unwrap());
     let report = &job["result"];
@@ -269,6 +271,7 @@ fn checks_patches_against_warm_generations() {
     assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");
     assert!(!stats["recent"].as_array().unwrap().is_empty(), "{stats:#}");
     assert!(stats["recent"].as_array().unwrap().iter().any(|job| job["kind"] == "build"), "{stats:#}");
+    assert_eq!(stats["live"], json!([]), "{stats:#}");
     let checks = stats["repos"][0]["checks"].as_array().unwrap();
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");

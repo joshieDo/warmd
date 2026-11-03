@@ -79,6 +79,7 @@ impl Repo {
             sha: None,
             error: None,
             phases: Vec::new(),
+            since: 0,
         };
         Ok(Self {
             name,
@@ -144,6 +145,11 @@ impl Repo {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn building(&self) -> Option<(String, u64)> {
+        let status = self.status();
+        matches!(status.state, State::Refreshing).then(|| (status.sha.clone().unwrap_or_default(), status.since))
     }
 
     pub(crate) fn jobs_dir(&self) -> &Path {
@@ -351,7 +357,7 @@ impl Repo {
     }
 
     fn set_status(&self, state: State, sha: &str, error: Option<String>, phases: Vec<Phase>) {
-        *self.status() = Status { state, sha: Some(sha.to_owned()), error, phases };
+        *self.status() = Status { state, sha: Some(sha.to_owned()), error, phases, since: now_secs() };
     }
 
     fn gens(&self) -> MutexGuard<'_, Vec<Arc<Gen>>> {
@@ -434,6 +440,8 @@ struct Status {
     sha: Option<String>,
     error: Option<String>,
     phases: Vec<Phase>,
+    #[serde(skip)]
+    since: u64,
 }
 
 pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {

@@ -69,11 +69,22 @@ enum Done {
     Refresh(View),
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct Live {
+    repo: String,
+    kind: &'static str,
+    branch: Option<String>,
+    base: String,
+    started: u64,
+    running_since: Option<u64>,
+}
+
 #[derive(Debug)]
 struct App {
     repos: Mutex<BTreeMap<String, Arc<Repo>>>,
     full: Profile,
     jobs: Mutex<HashMap<Uuid, (u64, Job)>>,
+    live: Mutex<HashMap<Uuid, Live>>,
     config_dir: PathBuf,
     keep: Duration,
     machine: Machine,
@@ -142,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         full: Profile::full()?,
         config_dir: dir,
         jobs: Mutex::default(),
+        live: Mutex::default(),
         keep,
         machine: Machine::default(),
         state_dir: config.state_dir.clone(),
@@ -189,10 +201,26 @@ async fn submit(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<
 fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
     let id = Uuid::new_v4();
     app.set(id, Job::Queued);
+    let live = Live {
+        repo: repo.name().to_owned(),
+        kind: req.kind(),
+        branch: req.branch().map(str::to_owned),
+        base: req.base_sha().to_owned(),
+        started: now_secs(),
+        running_since: None,
+    };
+    app.live.lock().unwrap_or_else(PoisonError::into_inner).insert(id, live);
     let (app, repo) = (Arc::clone(app), Arc::clone(repo));
     spawn(async move {
         let layer = repo.jobs_dir().join(id.to_string());
-        let (outcome, phases) = check::run(&repo, &app.full, req, &layer, || app.set(id, Job::Running)).await;
+        let running = || {
+            app.set(id, Job::Running);
+            if let Some(entry) = app.live.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&id) {
+                entry.running_since = Some(now_secs());
+            }
+        };
+        let (outcome, phases) = check::run(&repo, &app.full, req, &layer, running).await;
+        app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
         app.finish(id, outcome.map(Done::Check), phases);
     });
     id
@@ -256,7 +284,17 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
         *counts.entry(state).or_default() += 1;
     }
     let machine = app.machine.view(&app.state_dir).await;
-    Json(json!({ "machine": machine, "repos": repos, "recent": recent, "jobs": counts }))
+    let mut live = app.live.lock().unwrap_or_else(PoisonError::into_inner).values().cloned().collect::<Vec<_>>();
+    live.sort_by_key(|job| job.started);
+    let builds = all
+        .iter()
+        .filter_map(|(name, repo)| {
+            repo.building().map(|(sha, since)| json!({ "repo": name, "sha": sha, "started": since }))
+        })
+        .collect::<Vec<_>>();
+    Json(
+        json!({ "machine": machine, "repos": repos, "recent": recent, "jobs": counts, "live": live, "building": builds }),
+    )
 }
 
 async fn prune_remote_forever(dir: PathBuf) -> ! {
