@@ -29,3 +29,13 @@ jobs = [
   { name = "fmt", cmd = "cargo fmt --all --check" },
 ]
 slapslop = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run ."
+
+[repos.warmd]
+url = "https://github.com/joshieDo/warmd"
+clippy = "cargo clippy --locked --message-format=json"
+jobs = [
+  { name = "clippy", cmd = "cargo clippy --all-targets --all-features --locked --message-format=json", fix = "cargo clippy --all-targets --all-features --locked --fix --allow-dirty --allow-no-vcs" },
+  { name = "clippy-non-test", cmd = "cargo clippy --bins --all-features --locked --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
+  { name = "fmt", cmd = "cargo fmt --check" },
+]
+slapslop = 'cargo-slapslop run "$PWD" --all-lints'
