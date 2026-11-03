@@ -242,6 +242,7 @@ fn checks_patches_against_warm_generations() {
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
     assert_eq!(first["fields"]["ran_on"], json!(base));
+    assert_eq!((first["fields"]["base"].clone(), first["fields"]["dirty"].clone()), (json!(base), json!(true)));
     until(|| {
         curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][1]["bytes"].is_u64()
     });

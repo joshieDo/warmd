@@ -196,7 +196,7 @@ pub(crate) async fn run(
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
     let kind = if req.baseline_only { "slapslop_baseline" } else { "check" };
-    let (base, branch) = (req.base.sha.clone(), req.branch.clone());
+    let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
     let outcome = check(repo, profiles, req, layer, running, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if let Err(err) = repo::remove_tree(layer).await {
@@ -214,6 +214,7 @@ pub(crate) async fn run(
         "repo": repo.name(),
         "result": result,
         "base": base,
+        "dirty": dirty,
         "branch": branch,
         "ran_on": ran_on,
         "layer_bytes": layer_bytes,

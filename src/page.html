@@ -58,7 +58,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
   <header><h1>warmd</h1><span class="muted" id="updated"></span></header>
   <section class="grid" id="machine"></section>
   <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Main</th><th>Disk</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
-  <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
+  <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Commit</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
 </main>
 <div id="modal" hidden><div class="sheet"><header><h1 id="modal-title"></h1><button id="modal-close">✕</button></header><div id="modal-body"></div></div></div>
 <script>
@@ -135,8 +135,11 @@ async function load() {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
     const res = String(j.fields.result ?? (j.fields.ok ? "ok" : "failed"));
     const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
-    return '<tr><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
-  }).join("") || '<tr><td colspan="6" class="muted">No jobs yet</td></tr>';
+    const repo = last.repos.find(r => r.name === j.fields.repo), sha = String(j.fields.base ?? j.fields.sha ?? "");
+    const label = sha ? '<code>' + esc(sha.slice(0, 7)) + (j.fields.dirty ? '-dirty' : '') + '</code>' : '<span class="muted">–</span>';
+    const commit = sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
+    return '<tr><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + commit + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
+  }).join("") || '<tr><td colspan="7" class="muted">No jobs yet</td></tr>';
   $("updated").textContent = "updated " + new Date().toLocaleTimeString();
 }
 load(); setInterval(load, 5000);
