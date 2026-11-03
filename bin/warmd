@@ -69,6 +69,8 @@ track() {
     return 1
   fi
   ok=$(jq -r .result.ok <<<"$job")
+  jq -r '"warmd: summary: " + (.result.jobs | map(.name + " " + (if (.new | length) == 0 and .output == null then "ok" else "\(.new | length) new" + (if .output then ", failed" else "" end) end)) | join(", "))' <<<"$job" >&2
+  push_nudge
   not_run=$(jq -r '.result.not_run // [] | join(", ")' <<<"$job")
   if [[ $ok == true && -n $not_run ]]; then
     echo "warmd: ok (partial: $not_run not run). Not CI ok: run warmd check without --only/--skip before you push or open a PR." >&2
