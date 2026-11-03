@@ -69,7 +69,7 @@ impl SessionView {
     fn of(name: String, meta: &Value, idle: Duration, main: Option<&String>) -> Self {
         let idle_secs = now_secs().saturating_sub(meta["used_at"].as_u64().unwrap_or_default());
         Self {
-            name,
+            name: meta["session"].as_str().map_or(name, str::to_owned),
             bytes: meta["bytes"].as_u64(),
             idle_secs,
             expires_in_secs: idle.as_secs().saturating_sub(idle_secs),
@@ -147,15 +147,19 @@ impl Repo {
     }
 
     pub(crate) async fn session(&self, name: &str) -> (PathBuf, OwnedMutexGuard<()>) {
-        let lock = Arc::clone(
-            self.sessions.lock().unwrap_or_else(PoisonError::into_inner).entry(name.to_owned()).or_default(),
-        );
+        let key = session_key(name);
+        let lock =
+            Arc::clone(self.sessions.lock().unwrap_or_else(PoisonError::into_inner).entry(key.clone()).or_default());
         let guard = lock.lock_owned().await;
-        let key = name
-            .bytes()
-            .map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte) } else { '_' })
-            .collect::<String>();
         (self.jobs_dir.join("sessions").join(key), guard)
+    }
+
+    fn try_session(&self, key: &str) -> Option<(PathBuf, OwnedMutexGuard<()>)> {
+        let guard =
+            Arc::clone(self.sessions.lock().unwrap_or_else(PoisonError::into_inner).entry(key.to_owned()).or_default())
+                .try_lock_owned()
+                .ok()?;
+        Some((self.jobs_dir.join("sessions").join(key), guard))
     }
 
     async fn prune_sessions(&self, idle: Duration) -> anyhow::Result<()> {
@@ -163,7 +167,19 @@ impl Repo {
         let names = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect::<Vec<_>>();
         let mut views = Vec::with_capacity(names.len());
         for name in names {
-            let (dir, _guard) = self.session(&name).await;
+            // A session in use (a check queued or running on it) is skipped, so a long check never holds up
+            // this repo's main poll; it is looked at again next poll.
+            let Some((dir, _guard)) = self.try_session(&name) else {
+                views.extend(
+                    self.session_views
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .iter()
+                        .filter(|view| session_key(&view.name) == name)
+                        .cloned(),
+                );
+                continue;
+            };
             let meta = read_to_string(dir.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
             let stale = meta.as_ref().is_none_or(|meta| {
                 let used = meta["used_at"].as_u64().unwrap_or_default();
@@ -545,12 +561,18 @@ async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<to
             .and_then(|meta| meta["session"].as_str().map(str::to_owned))
         {
             Some(name) => {
-                kept.insert(name, Arc::default());
+                kept.insert(session_key(&name), Arc::default());
             }
             None => remove_tree(&dir).await?,
         }
     }
     Ok(kept)
+}
+
+/// The session dir and lock of a branch: two branches that differ only in punctuation share one, never a dir
+/// with two locks.
+fn session_key(name: &str) -> String {
+    name.bytes().map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte) } else { '_' }).collect()
 }
 
 pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {

@@ -29,7 +29,10 @@ push_nudge() {
 wait_job() {
   local job state shown=0 pending
   while :; do
-    job=$(curl -fsS "$url/jobs/$1")
+    if ! job=$(curl -fsS "$url/jobs/$1" 2>/dev/null); then
+      echo "warmd: job $1 is gone (warmd restarted, or the job is older than 4 days): run warmd check again" >&2
+      return 1
+    fi
     state=$(jq -r .state <<<"$job")
     [[ $state == "done" || $state == "failed" ]] && break
     if [[ $(jq '.progress.partial | length' <<<"$job") -gt $shown ]]; then
