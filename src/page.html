@@ -53,6 +53,13 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .parts { margin: 4px 0 0; font-size: 12px; }
 .detail section { margin-bottom: 18px; } .kv { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
 .tl { margin: 4px 0 10px; } .tl-row { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: center; margin: 6px 0; } .tl-name { font-size: 11px; color: var(--muted); text-align: right; text-transform: uppercase; letter-spacing: .04em; } .tl-track { position: relative; height: 26px; background: var(--fill); border-radius: 6px; overflow: hidden; } .tl-seg { position: absolute; top: 3px; bottom: 3px; margin-left: 1px; border-radius: 4px; display: flex; align-items: center; overflow: hidden; } .tl-seg span { padding: 0 8px; font-size: 11px; font-weight: 500; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .tl-ticks { position: relative; height: 14px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); } .tl-ticks span { position: absolute; top: 2px; transform: translateX(-50%); } .tl-ticks span:first-child { transform: none; } .tl-ticks span:last-child { transform: translateX(-100%); } .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 16px 82px; font-size: 12px; color: var(--muted); } .leg i, .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; } table.phases { table-layout: fixed; } table.phases th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; } .ph-name { width: 200px; font-weight: 500; } .ph-job { margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--muted); } .ph-dur { width: 64px; text-align: right; font-variant-numeric: tabular-nums; } .ph-share { width: 120px; } .share { height: 6px; background: var(--fill); border-radius: 3px; overflow: hidden; } .share div { height: 100%; border-radius: 3px; } .ph-cmd code { display: block; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); } .ph-cmd details { margin-top: 4px; } .ph-cmd summary { font-size: 11px; color: var(--muted); cursor: pointer; } .ph-cmd pre { margin: 6px 0 0; padding: 8px 10px; background: var(--fill); border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 160px; overflow: auto; }
+.stack { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: rgba(127,127,127,.15); margin: 4px 0 8px; }
+.stack span { display: block; height: 100%; border-right: 1px solid rgba(0,0,0,.25); }
+.dlegend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; margin-bottom: 8px; }
+.dlegend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.s-main { background: #3b82f6; } .s-main + .s-main { background: #60a5fa; } .s-main + .s-main + .s-main { background: #93c5fd; }
+.s-old { background: #9ca3af; } .s-sess { background: #f59e0b; } .s-cache { background: #10b981; }
+#modal-body h2 { margin-top: 18px; }
 </style>
 </head>
 <body>
@@ -180,26 +187,35 @@ function recentDetail(i) {
 }
 function tree(i) {
   open = i;
-  const r = last.repos[i], gens = [...r.view.gens].reverse();
-  const checks = r.checks.filter(c => c.kind === "check" || c.kind === "slapslop_baseline").reverse();
-  const shown = new Set();
-  const node = (label, meta, cls) => '<li><span class="node">' + (cls ? dot(cls) : "") + label + '</span> <span class="muted">' + meta + '</span>';
-  const checkNode = c => {
+  const r = last.repos[i], v = r.view, gens = [...v.gens].reverse(), main = gens[0], older = gens.slice(1);
+  const sessions = v.sessions || [];
+  const checks = r.checks.filter(c => c.kind === "check" || c.kind === "full" || c.kind === "slapslop_baseline").reverse().slice(0, 15);
+  const label = p => p.jobs.includes("source") ? "source" : p.jobs.includes("slapslop") ? "slapslop target" : p.jobs.length === 1 && p.jobs[0] === "fmt" ? "fmt" : "cargo target (" + p.jobs.join(", ") + ")";
+  const mainParts = (main?.parts || []).filter(p => p.bytes > 0).sort((a, b) => b.bytes - a.bytes);
+  const segs = [
+    ...mainParts.map(p => ({ name: "main · " + label(p), bytes: p.bytes, cls: "s-main" })),
+    { name: "older builds", bytes: older.reduce((s, g) => s + (g.own_bytes || 0), 0), cls: "s-old" },
+    { name: "sessions (" + sessions.length + ")", bytes: sessions.reduce((s, x) => s + (x.bytes || 0), 0), cls: "s-sess" },
+    { name: "build cache", bytes: v.cache_bytes || 0, cls: "s-cache" },
+  ].filter(s => s.bytes > 0);
+  const total = segs.reduce((s, x) => s + x.bytes, 0);
+  const stack = '<div class="stack">' + segs.map(s => '<span class="' + s.cls + '" style="width:' + Math.max(pct(s.bytes, total), 0.5) + '%" title="' + esc(s.name) + ' ' + gb(s.bytes) + '"></span>').join("") + '</div>';
+  const legend = '<div class="dlegend">' + segs.map(s => '<span><i class="' + s.cls + '"></i>' + esc(s.name) + ' <b>' + gb(s.bytes) + '</b></span>').join("") + '</div>';
+  const table = (head, rows, empty) => '<table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join("") + '</tr></thead><tbody>' + (rows.join("") || '<tr><td colspan="' + head.length + '" class="muted">' + empty + '</td></tr>') + '</tbody></table>';
+  const td = (...cells) => '<tr>' + cells.map(c => '<td>' + c + '</td>').join("") + '</tr>';
+  const commit = sha => commitLink(r.name, sha, false);
+  const mainSec = main ? '<h2>Main build</h2><p class="muted">' + commit(main.sha) + ' · ' + dur(main.age_secs) + ' old · ' + size(main.bytes) + ' · shared by every check, never expires while it is main</p>' +
+    table(["Part", "Size"], mainParts.map(p => td(esc(label(p)), gb(p.bytes))), "not measured yet") : '<h2>Main build</h2><p class="muted">none yet</p>';
+  const oldSec = '<h2>Older builds</h2>' + table(["Commit", "Own size", "Age", "Deleted in"], older.map(g => td(commit(g.sha), size(g.own_bytes), dur(g.age_secs), dur(g.expires_in_secs))), "none: only main is kept");
+  const sessSec = '<h2>Sessions</h2><p class="muted">One per branch: its own changes and build outputs on top of main. Deleted after 30 min idle or when main moves.</p>' +
+    table(["Branch", "Size", "Idle", "Deleted in", "Base"], sessions.map(s => td(esc(s.name), size(s.bytes), dur(s.idle_secs), dur(s.expires_in_secs), s.on_main ? "main" : '<span class="muted">older build</span>')), "no live sessions");
+  const checkSec = '<h2>Recent checks</h2>' + table(["Branch", "Kind", "Result", "Layer", "Took", "When"], checks.map(c => {
     const f = c.fields, res = String(f.result ?? "");
-    const name = f.branch ? esc(f.branch) : f.base ? 'base <code>' + esc(String(f.base).slice(0, 7)) + '</code>' : 'check';
-    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" || res === "built" ? "ok" : "refreshing";
-    return node(name, esc(res.slice(0, 80)) + ' · ' + size(f.layer_bytes) + ' · ' + dur(c.total_secs) + ' · ' + ago(c.at), cls) + '</li>';
-  };
-  const items = gens.map((g, n) => {
-    const own = checks.filter(c => c.fields.ran_on === g.sha);
-    own.forEach(c => shown.add(c));
-    const label = (n === 0 ? '<b>main</b> ' : '') + '<code>' + esc(g.sha.slice(0, 7)) + '</code>';
-    const meta = (n === 0 ? size(g.bytes) : '+' + size(g.own_bytes) + ' · TTL ' + dur(g.expires_in_secs)) + ' · ' + dur(g.age_secs) + ' old';
-    return node(label, meta, n === 0 ? "ready" : "") + '<div class="parts">' + parts(g) + '</div>' + (own.length ? '<ul>' + own.map(checkNode).join("") + '</ul>' : "") + '</li>';
-  }).join("");
-  const other = checks.filter(c => !shown.has(c));
-  $("modal-title").textContent = r.name;
-  $("modal-body").innerHTML = '<ul class="tree">' + items + '</ul>' + (other.length ? '<h2 style="margin-top:20px">Checks on deleted builds</h2><ul class="tree">' + other.map(checkNode).join("") + '</ul>' : "");
+    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
+    return td(f.branch ? esc(f.branch) : f.base ? commit(f.base) : "–", esc(c.kind), dot(cls) + esc(res.slice(0, 50)), size(f.layer_bytes), dur(c.total_secs), ago(c.at));
+  }), "none");
+  $("modal-title").textContent = r.name + " · " + gb(total) + " on disk";
+  $("modal-body").innerHTML = stack + legend + mainSec + oldSec + sessSec + checkSec;
   $("modal").hidden = false;
 }
 function closeTree() { open = null; $("modal").hidden = true; }

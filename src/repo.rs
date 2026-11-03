@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     ffi::OsStr,
     fs,
@@ -51,6 +52,30 @@ pub(crate) struct Repo {
     status: Mutex<Status>,
     building: tokio::sync::Mutex<()>,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    session_views: Mutex<Vec<SessionView>>,
+    cache_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionView {
+    name: String,
+    bytes: Option<u64>,
+    idle_secs: u64,
+    expires_in_secs: u64,
+    on_main: bool,
+}
+
+impl SessionView {
+    fn of(name: String, meta: &Value, idle: Duration, main: Option<&String>) -> Self {
+        let idle_secs = now_secs().saturating_sub(meta["used_at"].as_u64().unwrap_or_default());
+        Self {
+            name,
+            bytes: meta["bytes"].as_u64(),
+            idle_secs,
+            expires_in_secs: idle.as_secs().saturating_sub(idle_secs),
+            on_main: main.is_some_and(|sha| meta["gen"] == sha.as_str()),
+        }
+    }
 }
 
 impl Repo {
@@ -96,6 +121,8 @@ impl Repo {
             status: Mutex::new(status),
             building: tokio::sync::Mutex::new(()),
             sessions: Mutex::default(),
+            session_views: Mutex::default(),
+            cache_bytes: AtomicU64::new(0),
         })
     }
 
@@ -134,6 +161,7 @@ impl Repo {
     async fn prune_sessions(&self, idle: Duration) -> anyhow::Result<()> {
         let live = self.gens().iter().map(|generation| generation.sha.clone()).collect::<Vec<_>>();
         let names = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect::<Vec<_>>();
+        let mut views = Vec::with_capacity(names.len());
         for name in names {
             let (dir, _guard) = self.session(&name).await;
             let meta = read_to_string(dir.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
@@ -144,7 +172,15 @@ impl Repo {
             if stale {
                 remove_tree(&dir).await?;
                 self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
+            } else if let Some(meta) = meta {
+                views.push(SessionView::of(name, &meta, idle, live.last()));
             }
+        }
+        views.sort_by_key(|view| Reverse(view.bytes));
+        *self.session_views.lock().unwrap_or_else(PoisonError::into_inner) = views;
+        let cache = self.gens_dir.with_file_name("cache");
+        if symlink_metadata(&cache).await.is_ok() {
+            self.cache_bytes.store(dir_bytes(&cache).await?, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -237,7 +273,13 @@ impl Repo {
             .collect::<Vec<GenView>>();
         let current = gens.last().map(|generation| generation.sha.clone());
         drop(all);
-        View { status: self.status().clone(), current, gens }
+        View {
+            status: self.status().clone(),
+            current,
+            gens,
+            sessions: self.session_views.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            cache_bytes: Some(self.cache_bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0),
+        }
     }
 
     pub(crate) async fn recent(&self, count: usize) -> Vec<Value> {
@@ -411,6 +453,8 @@ pub(crate) struct View {
     status: Status,
     current: Option<String>,
     gens: Vec<GenView>,
+    sessions: Vec<SessionView>,
+    cache_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

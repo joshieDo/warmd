@@ -217,6 +217,7 @@ struct Scope {
     affected: BTreeSet<String>,
     whole: bool,
     bins_touched: bool,
+    benches_touched: bool,
 }
 
 impl Scope {
@@ -257,6 +258,14 @@ impl Scope {
         scope.bins_touched = files
             .iter()
             .any(|file| bin_roots.contains(&file.as_str()) || file.starts_with("bin/") || file.contains("/bin/"));
+        scope.benches_touched = files.iter().any(|file| {
+            ["benches/", "examples/"].iter().any(|dir| file.starts_with(dir) || file.contains(&format!("/{dir}")))
+                || metadata.packages.iter().flat_map(|package| &package.targets).any(|target| {
+                    target.kind.iter().any(|kind| kind == "bench" || kind == "example")
+                        && target.src_path.strip_prefix(root).and_then(|path| path.strip_prefix('/'))
+                            == Some(file.as_str())
+                })
+        });
         scope.affected.clone_from(&scope.touched);
         loop {
             let dependents = metadata
@@ -280,7 +289,10 @@ impl Scope {
     fn command(&self, scoped: &str) -> Option<String> {
         (!self.affected.is_empty()).then(|| {
             let list = self.affected.iter().map(String::as_str).collect::<Vec<_>>().join(",");
-            scoped.replace("{packages}", &Self::flags(&self.affected)).replace("{packages_csv}", &list)
+            scoped
+                .replace("{touched}", &Self::flags(&self.touched))
+                .replace("{packages}", &Self::flags(&self.affected))
+                .replace("{packages_csv}", &list)
         })
     }
 }
@@ -296,7 +308,8 @@ pub(crate) async fn run(
     let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
     let request = req.summary();
-    let (layer, session_guard) = match req.session.clone().filter(|_| !req.full_only) {
+    let session_name = req.session.clone().filter(|_| !req.full_only);
+    let (layer, session_guard) = match session_name.clone() {
         Some(name) => {
             let (dir, guard) = repo.session(&name).await;
             (dir, Some(guard))
@@ -307,7 +320,8 @@ pub(crate) async fn run(
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none()) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
-        let meta = json!({ "gen": built_on, "used_at": now_secs() }).to_string();
+        let meta = json!({ "gen": built_on, "used_at": now_secs(), "session": session_name, "bytes": layer_bytes })
+            .to_string();
         if let Err(err) = write(layer.join("meta.json"), meta).await {
             eprintln!("warmd: {}: {err:#}", repo.name());
         }
@@ -430,7 +444,7 @@ async fn check(
     }
 
     let added = diag::added_lines(&req.patch);
-    let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some() || job.bins_only) {
+    let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some() || job.bins_only || job.benches_only) {
         let scope = Scope::of(
             &sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?.stdout,
             &sandbox::work_path(repo.name()),
@@ -450,7 +464,9 @@ async fn check(
             && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
             && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
     }) {
-        if job.bins_only && !scope.whole && !scope.bins_touched {
+        if (job.bins_only && !scope.whole && !scope.bins_touched)
+            || (job.benches_only && !scope.whole && !scope.benches_touched)
+        {
             continue;
         }
         let template = match &job.on_patch {

@@ -58,6 +58,8 @@ pub(crate) struct Job {
     pub(crate) slapslop: bool,
     #[serde(default)]
     pub(crate) bins_only: bool,
+    #[serde(default)]
+    pub(crate) benches_only: bool,
 }
 
 impl Job {
