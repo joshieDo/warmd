@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, bail, ensure};
 use serde::Serialize;
 use serde_json::to_vec;
 use serde_json::{from_slice, json};
@@ -153,7 +153,8 @@ impl Repo {
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build(&tmp) };
         let mut baseline = Baseline::new();
         for job in self.cfg.all_jobs() {
-            let (_, found) = sandbox.diagnose(&job).await?;
+            let (out, found) = sandbox.diagnose(&job).await?;
+            ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));
             baseline.insert(job.name, found);
         }
