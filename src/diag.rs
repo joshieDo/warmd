@@ -31,6 +31,7 @@ struct Key {
 struct Line {
     reason: String,
     message: Option<Message>,
+    fresh: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +53,18 @@ struct Span {
     file_name: String,
     line_start: u32,
     is_primary: bool,
+}
+
+/// How many crates cargo really compiled (not fresh) in a JSON-message run; None when it printed no artifacts.
+pub(crate) fn rebuilt(stdout: &str) -> Option<u32> {
+    let artifacts = stdout
+        .lines()
+        .filter_map(|text| from_str::<Line>(text).ok())
+        .filter(|line| line.reason == "compiler-artifact")
+        .map(|line| line.fresh == Some(false))
+        .collect::<Vec<_>>();
+    (!artifacts.is_empty())
+        .then(|| artifacts.iter().filter(|&&built| built).fold(0_u32, |count, _| count.saturating_add(1)))
 }
 
 pub(crate) fn parse(stdout: &str) -> Vec<Diag> {

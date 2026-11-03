@@ -193,7 +193,10 @@ function recentDetail(i) {
   const res = String(f.result ?? (j.kind === "build" ? (f.ok ? "built" : "failed") : ""));
   const head = kv("Repo", esc(f.repo)) + kv("Commit", commitLink(f.repo, f.base || f.sha, f.dirty)) + kv("Ran on", f.ran_on && f.ran_on !== f.base ? commitLink(f.repo, f.ran_on, false) : "") +
     kv("Branch", esc(f.branch || "")) + kv("Kind", esc(j.kind)) + kv("Result", esc(res)) + kv("Finished", new Date(j.at * 1000).toLocaleString()) +
-    kv("Total", dur(j.total_secs)) + kv("Layer", f.layer_bytes != null ? size(f.layer_bytes) : "");
+    kv("Total", dur(j.total_secs)) + kv("Layer", f.layer_bytes != null ? size(f.layer_bytes) : "") +
+    (f.warmth ? kv("Session", f.warmth.session_reused ? "warm (reused)" : "<b>cold</b> (new or reset)") + (f.warmth.rebased ? kv("Rebased", "base was gone: ran on the current main") : "") +
+      kv("Crates rebuilt", Object.entries(f.warmth.rebuilt || {}).map(([k, v]) => esc(k) + " " + v).join(" · ") || "-") : "") +
+    (f.load_at_start != null ? kv("Machine load at start", f.load_at_start.toFixed(1)) : "");
   const span = r => ({ start: r.at - r.total_secs, end: r.at });
   const me = span(j);
   const related = last.recent.filter(r => r === j || (r.fields.repo === f.repo && r.fields.base === f.base && (r.fields.branch || null) === (f.branch || null) && span(r).start < me.end && span(r).end > me.start));
@@ -279,7 +282,7 @@ async function load() {
     const repo = last.repos.find(r => r.name === j.fields.repo), sha = String(j.fields.base ?? j.fields.sha ?? "");
     const label = sha ? '<code>' + esc(sha.slice(0, 7)) + (j.fields.dirty ? '-dirty' : '') + '</code>' : '<span class="muted">–</span>';
     const commit = sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
-    return '<tr class="click" data-recent="' + i + '"><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + (j.fields.branch ? esc(j.fields.branch) : commit) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
+    return '<tr class="click" data-recent="' + i + '"><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + (j.fields.branch ? esc(j.fields.branch) : commit) + '</td><td>' + esc(j.kind) + (j.fields.warmth && !j.fields.warmth.session_reused && j.fields.branch ? ' <span class="chip">cold</span>' : '') + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
   }).join("") || '<tr><td colspan="7" class="muted">No jobs yet</td></tr>';
   $("updated").textContent = "updated " + new Date().toLocaleTimeString();
 }

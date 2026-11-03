@@ -130,6 +130,17 @@ pub(crate) struct Report {
 }
 
 impl Report {
+    /// The cheap facts a dashboard needs to tell a warm check from a cold one.
+    fn metrics(&self) -> Value {
+        json!({
+            "session_reused": self.session_reused,
+            "rebased": self.rebased_from.is_some(),
+            "main_moved": self.main_moved,
+            "rebuilt": self.jobs.iter().filter_map(|job| Some((job.name.clone(), job.rebuilt?))).collect::<BTreeMap<_, _>>(),
+            "new": self.jobs.iter().map(|job| (job.name.clone(), job.new.len())).collect::<BTreeMap<_, _>>(),
+        })
+    }
+
     fn summary(&self) -> String {
         let full = self
             .full
@@ -189,6 +200,7 @@ struct JobResult {
     new: Vec<Diag>,
     output: Option<String>,
     custom_args: bool,
+    rebuilt: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +322,10 @@ pub(crate) async fn run(
     progress: impl Fn(Value),
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
+    let load_at_start = read_to_string("/proc/loadavg")
+        .await
+        .ok()
+        .and_then(|text| text.split_whitespace().next().and_then(|load| load.parse::<f64>().ok()));
     let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
     let request = req.summary();
@@ -341,7 +357,13 @@ pub(crate) async fn run(
         Err(err) => format!("failed: {err:#}"),
     };
     let ran_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
+    let warmth = outcome.as_ref().ok().and_then(|done| match done {
+        Outcome::Checked(report) => Some(report.metrics()),
+        Outcome::RebaseNeeded { .. } | Outcome::SlapslopBaseline { .. } => None,
+    });
     let fields = json!({
+        "warmth": warmth,
+        "load_at_start": load_at_start,
         "repo": repo.name(),
         "result": result,
         "base": base,
@@ -524,7 +546,14 @@ async fn check(
         } else {
             diag::new_only(found, generation.baseline(&job.name))
         };
-        jobs.push(JobResult { name: job.name.clone(), exit: out.code, new, output, custom_args: custom.is_some() });
+        jobs.push(JobResult {
+            name: job.name.clone(),
+            exit: out.code,
+            new,
+            output,
+            custom_args: custom.is_some(),
+            rebuilt: diag::rebuilt(&out.stdout),
+        });
         clock.mark(format!("job:{}", job.name));
     }
 
