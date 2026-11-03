@@ -196,6 +196,9 @@ fn checks_patches_against_warm_generations() {
     only["only"] = json!(["fmt"]);
     let job = warmd.job("check", &only);
     assert_eq!(names(&job["result"]["jobs"]), ["fmt"], "{job:#}");
+    only["only"] = json!(["clippy"]);
+    let job = warmd.job("check", &only);
+    assert_eq!(names(&job["result"]["jobs"]), ["clippy"], "{job:#}");
     assert!(codes(&report["jobs"][0]["new"]).contains(&"clippy::must_use_candidate"), "{report:#}");
     assert!(codes(&report["jobs"][1]["new"]).iter().all(|code| *code == "wide_tuple"), "{report:#}");
 

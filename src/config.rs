@@ -70,8 +70,10 @@ impl Job {
         if template.contains("{args}") { template.replace("{args}", &args) } else { format!("{template} {args}") }
     }
 
-    pub(crate) fn answers_to(&self, key: &str) -> bool {
-        self.name == key || self.name.strip_prefix(key).is_some_and(|rest| rest.starts_with('-'))
+    pub(crate) fn answers_to(&self, key: &str, jobs: &[Self]) -> bool {
+        self.name == key
+            || (!jobs.iter().any(|job| job.name == key)
+                && self.name.strip_prefix(key).is_some_and(|rest| rest.starts_with('-')))
     }
 }
 

@@ -331,8 +331,12 @@ async fn check(
     if let Some(asked) = &req.base.branch {
         ensure!(asked == branch, "{asked} is not tracked for {}, only {branch}", repo.name());
     }
-    if let Some(key) =
-        req.args.keys().chain(&req.skip).chain(&req.only).find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key)))
+    if let Some(key) = req
+        .args
+        .keys()
+        .chain(&req.skip)
+        .chain(&req.only)
+        .find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key, &cfg.jobs)))
     {
         bail!("no job of {} answers to {key}", repo.name());
     }
@@ -425,8 +429,8 @@ async fn check(
     for job in all_jobs.iter().filter(|job| {
         !job.warm_only
             && !req.full_only
-            && !req.skip.iter().any(|key| job.answers_to(key))
-            && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key)))
+            && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
+            && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
     }) {
         let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
@@ -438,7 +442,7 @@ async fn check(
         let custom = req
             .args
             .get(&job.name)
-            .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key)).map(|(_, over)| over));
+            .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
         let (out, mut found) = sandbox.diagnose(job, &job.render(&template, custom)).await?;
         let output = (!out.ok() && found.is_empty()).then(|| out.tail());
         let new = if custom.is_some() {
