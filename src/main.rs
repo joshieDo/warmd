@@ -39,7 +39,7 @@ mod stats;
 
 const SECS_PER_HOUR: u64 = 3600;
 
-const RECENT_PER_REPO: usize = 30;
+const RECENT_PER_REPO: usize = 100;
 
 const RECENT_JOBS: usize = 25;
 
@@ -173,8 +173,9 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
     for (name, repo) in &app.repos {
         let history = repo.recent(RECENT_PER_REPO).await;
         let last_build = history.iter().rev().find(|record| record["kind"] == "build").cloned();
-        recent.extend(history.into_iter().filter(|record| record["kind"] != "build"));
-        repos.push(json!({ "name": name, "view": repo.view(), "last_build": last_build }));
+        let checks = history.into_iter().filter(|record| record["kind"] != "build").collect::<Vec<_>>();
+        recent.extend(checks.iter().cloned());
+        repos.push(json!({ "name": name, "view": repo.view(), "last_build": last_build, "checks": checks }));
     }
     recent.sort_by_key(|record| Reverse(record["at"].as_u64()));
     recent.truncate(RECENT_JOBS);

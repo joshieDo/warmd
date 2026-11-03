@@ -3,7 +3,10 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -13,6 +16,7 @@ use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
     fs::{read_to_string, remove_file, rename, symlink_metadata, write},
     process::Command,
+    spawn,
     sync::{Semaphore, SemaphorePermit},
     time::sleep,
 };
@@ -54,6 +58,9 @@ impl Repo {
         fs::create_dir_all(&jobs_dir)?;
         fs::create_dir_all(&gens_dir)?;
         let gens = adopt(&gens_dir)?;
+        for generation in &gens {
+            spawn(measure(Arc::clone(generation)));
+        }
         let metrics_file = state_dir.join(&name).join("metrics.jsonl");
         let status = Status {
             state: if gens.is_empty() { State::Empty } else { State::Ready },
@@ -120,7 +127,8 @@ impl Repo {
                     Duration::ZERO
                 });
                 let expires_in_secs = (index < newest).then(|| self.keep.saturating_sub(age).as_secs());
-                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs }
+                let bytes = Some(generation.bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0);
+                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs, bytes }
             })
             .collect::<Vec<GenView>>();
         let current = gens.last().map(|generation| generation.sha.clone());
@@ -153,7 +161,9 @@ impl Repo {
             let phases = clock.into_phases();
             match built {
                 Ok(generation) => {
-                    self.gens().push(Arc::new(generation));
+                    let generation = Arc::new(generation);
+                    spawn(measure(Arc::clone(&generation)));
+                    self.gens().push(generation);
                     self.set_status(State::Ready, &head, None, phases);
                 }
                 Err(err) => {
@@ -202,7 +212,7 @@ impl Repo {
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         clock.mark("save");
-        Ok(Gen { sha: sha.to_owned(), dir, baseline, born: SystemTime::now() })
+        Ok(Gen { sha: sha.to_owned(), dir, baseline, born: SystemTime::now(), bytes: AtomicU64::new(0) })
     }
 
     async fn prune(&self, keep: Duration) -> anyhow::Result<()> {
@@ -247,6 +257,7 @@ pub(crate) struct Gen {
     dir: PathBuf,
     baseline: Baseline,
     born: SystemTime,
+    bytes: AtomicU64,
 }
 
 impl Gen {
@@ -275,6 +286,7 @@ struct GenView {
     sha: String,
     age_secs: u64,
     expires_in_secs: Option<u64>,
+    bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -304,6 +316,11 @@ pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) -> ! 
     }
 }
 
+pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
+    let out = checked(Command::new("du").arg("-sb").arg(path)).await?;
+    Ok(out.split_whitespace().next().context("du printed nothing")?.parse()?)
+}
+
 pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     if symlink_metadata(path).await.is_err() {
         return Ok(());
@@ -311,6 +328,13 @@ pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     checked(Command::new("chmod").arg("-R").arg("u+rwX").arg(path)).await?;
     checked(Command::new("rm").arg("-rf").arg(path)).await?;
     Ok(())
+}
+
+async fn measure(generation: Arc<Gen>) {
+    match dir_bytes(&generation.dir).await {
+        Ok(bytes) => generation.bytes.store(bytes, Ordering::Relaxed),
+        Err(err) => eprintln!("warmd: measuring {}: {err:#}", generation.dir.display()),
+    }
 }
 
 fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
@@ -324,7 +348,7 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
         }
         let baseline = from_slice(&fs::read(&path)?)?;
         let born = fs::metadata(&path)?.modified()?;
-        gens.push(Arc::new(Gen { sha: sha.to_owned(), dir, baseline, born }));
+        gens.push(Arc::new(Gen { sha: sha.to_owned(), dir, baseline, born, bytes: AtomicU64::new(0) }));
     }
     gens.sort_by_key(|generation| generation.born);
     Ok(gens)

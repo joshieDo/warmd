@@ -30,6 +30,7 @@ pub(crate) struct Request {
     #[serde(default)]
     fix: bool,
     slapslop_baseline: Option<String>,
+    branch: Option<String>,
     #[serde(skip)]
     baseline_only: bool,
 }
@@ -80,6 +81,15 @@ pub(crate) enum Outcome {
     Checked(Report),
     RebaseNeeded { files: Vec<String> },
     SlapslopBaseline { baseline: String },
+}
+
+impl Outcome {
+    fn ran_on(&self) -> Option<String> {
+        match self {
+            Self::Checked(report) => Some(report.ran_on.clone()),
+            Self::RebaseNeeded { .. } | Self::SlapslopBaseline { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,7 +192,9 @@ pub(crate) async fn run(
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
     let kind = if req.baseline_only { "slapslop_baseline" } else { "check" };
+    let (base, branch) = (req.base.sha.clone(), req.branch.clone());
     let outcome = check(repo, profiles, req, layer, running, &mut clock).await;
+    let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if let Err(err) = repo::remove_tree(layer).await {
         eprintln!("warmd: {}: {err:#}", repo.name());
     }
@@ -193,7 +205,16 @@ pub(crate) async fn run(
         Ok(Outcome::SlapslopBaseline { .. }) => "baseline".to_owned(),
         Err(err) => format!("failed: {err:#}"),
     };
-    metrics::record(&repo.metrics_file(), kind, json!({ "repo": repo.name(), "result": result }), &clock).await;
+    let ran_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
+    let fields = json!({
+        "repo": repo.name(),
+        "result": result,
+        "base": base,
+        "branch": branch,
+        "ran_on": ran_on,
+        "layer_bytes": layer_bytes,
+    });
+    metrics::record(&repo.metrics_file(), kind, fields, &clock).await;
     (outcome, clock.into_phases())
 }
 

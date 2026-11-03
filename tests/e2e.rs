@@ -47,8 +47,8 @@ poll_secs = 3600
 [repos.demo]
 url = "file://{root}/demo.git"
 jobs = [
-  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", on_patch = "cargo clippy --all-targets {{packages}} --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
-  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', on_patch = 'cargo-slapslop run "$PWD" --all-lints --package {{packages_csv}}', slapslop = true }},
+  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
+  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true }},
   {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
 ]
 "#,
@@ -140,8 +140,13 @@ fn checks_patches_against_warm_generations() {
     let base = warmd.head();
 
     let patch = warmd.diff("printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
-    let body =
-        json!({ "repo": "demo", "base": { "ref": "main", "sha": base }, "patch": patch, "profiles": ["pedantic"] });
+    let body = json!({
+        "repo": "demo",
+        "base": { "ref": "main", "sha": base },
+        "patch": patch,
+        "profiles": ["pedantic"],
+        "branch": "feat/first",
+    });
     let job = warmd.job("check", &body);
     let report = &job["result"];
     assert_eq!(report["outcome"], "checked");
@@ -183,7 +188,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(job["result"], json!({ "outcome": "rebase_needed", "files": ["src/lib.rs"] }));
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
-    assert!(job["result"]["jobs"].as_array().unwrap().is_empty(), "{job:#}");
+    assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
@@ -192,6 +197,13 @@ fn checks_patches_against_warm_generations() {
     assert!(stats["repos"][0]["view"]["gens"][0]["expires_in_secs"].is_u64(), "{stats:#}");
     assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");
     assert!(!stats["recent"].as_array().unwrap().is_empty(), "{stats:#}");
+    let checks = stats["repos"][0]["checks"].as_array().unwrap();
+    let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
+    assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
+    assert_eq!(first["fields"]["ran_on"], json!(base));
+    until(|| {
+        curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][1]["bytes"].is_u64()
+    });
     assert!(sh(&warmd.root, &format!("curl -sf {}/", warmd.url)).contains("/stats"));
     let metrics = fs::read_to_string(warmd.root.join("state/demo/metrics.jsonl")).unwrap();
     let kinds = metrics.lines().map(|line| from_str::<Value>(line).unwrap()["kind"].clone()).collect::<Vec<_>>();
