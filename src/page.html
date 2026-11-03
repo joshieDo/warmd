@@ -60,8 +60,8 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
   <header><h1>warmd</h1><span class="muted" id="updated"></span></header>
   <section class="grid" id="machine"></section>
   <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Main</th><th>Disk</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
-  <section class="card"><h2>Running now</h2><table><thead><tr><th>Since</th><th>Repo</th><th>Commit</th><th>Kind</th><th>Branch</th><th>State</th></tr></thead><tbody id="live"></tbody></table></section>
-  <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Commit</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
+  <section class="card"><h2>Running now</h2><table><thead><tr><th>Since</th><th>Repo</th><th>Branch</th><th>Kind</th><th>State</th></tr></thead><tbody id="live"></tbody></table></section>
+  <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Branch</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
 </main>
 <div id="modal" hidden><div class="sheet"><header><h1 id="modal-title"></h1><button id="modal-close">✕</button></header><div id="modal-body"></div></div></div>
 <script>
@@ -237,8 +237,8 @@ async function load() {
     return sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
   };
   const liveRows = (s.building || []).map(b => '<tr><td class="muted">' + dur(Date.now() / 1000 - b.started) + '</td><td>' + esc(b.repo) + '</td><td>' + commitLink(b.repo, b.sha, false) + '</td><td>build</td><td class="muted">main</td><td>' + dot("refreshing") + 'building</td></tr>')
-    .concat((s.live || []).map((j, i) => '<tr class="click" data-live="' + i + '"><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + commitLink(j.repo, j.base, true) + '</td><td>' + esc(j.kind) + '</td><td>' + esc(j.branch || "–") + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
-  $("live").innerHTML = liveRows.join("") || '<tr><td colspan="6" class="muted">Nothing running</td></tr>';
+    .concat((s.live || []).map((j, i) => '<tr class="click" data-live="' + i + '"><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + (j.branch ? esc(j.branch) : commitLink(j.repo, j.base, false)) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
+  $("live").innerHTML = liveRows.join("") || '<tr><td colspan="5" class="muted">Nothing running</td></tr>';
   $("jobs").innerHTML = s.recent.map((j, i) => {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
     const res = String(j.fields.result ?? (j.kind === "build" ? (j.fields.ok ? "built" : "failed") : j.fields.ok ? "ok" : "failed"));
@@ -246,7 +246,7 @@ async function load() {
     const repo = last.repos.find(r => r.name === j.fields.repo), sha = String(j.fields.base ?? j.fields.sha ?? "");
     const label = sha ? '<code>' + esc(sha.slice(0, 7)) + (j.fields.dirty ? '-dirty' : '') + '</code>' : '<span class="muted">–</span>';
     const commit = sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
-    return '<tr class="click" data-recent="' + i + '"><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + commit + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
+    return '<tr class="click" data-recent="' + i + '"><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + (j.fields.branch ? esc(j.fields.branch) : commit) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
   }).join("") || '<tr><td colspan="7" class="muted">No jobs yet</td></tr>';
   $("updated").textContent = "updated " + new Date().toLocaleTimeString();
 }

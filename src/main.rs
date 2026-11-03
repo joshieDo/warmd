@@ -182,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/jobs/{id}", get(job))
         .route("/repos/{name}", get(repo_view))
         .route("/repos/{name}/refresh", post(refresh))
+        .route("/repos/{name}/hits", get(hits))
         .with_state(app);
     serve(TcpListener::bind(&config.listen).await.with_context(|| format!("binding {}", config.listen))?, router)
         .await?;
@@ -256,6 +257,12 @@ async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Job> {
 
 async fn repo_view(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<View> {
     Ok(Json(app.repo(&name)?.view()))
+}
+
+async fn hits(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<Value> {
+    let current =
+        app.repo(&name)?.current().ok_or_else(|| (StatusCode::NOT_FOUND, format!("{name} has no main build yet")))?;
+    Ok(Json(json!({ "sha": current.sha(), "jobs": current.hits() })))
 }
 
 async fn page() -> Html<&'static str> {

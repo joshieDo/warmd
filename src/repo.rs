@@ -33,7 +33,7 @@ use crate::{
 
 const SESSION_IDLE: Duration = Duration::from_mins(30);
 
-type Baseline = BTreeMap<String, Vec<Diag>>;
+pub(crate) type Baseline = BTreeMap<String, Vec<Diag>>;
 
 type Parts = BTreeMap<&'static str, u64>;
 
@@ -318,7 +318,8 @@ impl Repo {
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &tmp, cache: &cache } };
         let mut baseline = Baseline::new();
         for job in self.cfg().jobs.clone() {
-            let (out, found) = sandbox.diagnose(&job, &job.render(&job.cmd, None)).await?;
+            let (out, found) =
+                sandbox.diagnose(&job, &job.render(job.on_main.as_ref().unwrap_or(&job.cmd), None)).await?;
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));
             baseline.insert(job.name, found);
@@ -398,6 +399,10 @@ impl Gen {
 
     pub(crate) fn baseline(&self, job: &str) -> &[Diag] {
         self.baseline.get(job).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) const fn hits(&self) -> &Baseline {
+        &self.baseline
     }
 }
 

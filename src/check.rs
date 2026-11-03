@@ -446,8 +446,7 @@ async fn check(
     let all_jobs = &cfg.jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
     for job in all_jobs.iter().filter(|job| {
-        !job.warm_only
-            && !req.full_only
+        !req.full_only
             && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
             && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
     }) {

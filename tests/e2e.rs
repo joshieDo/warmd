@@ -50,8 +50,7 @@ url = "file://{root}/demo.git"
 jobs = [
   {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
   {{ name = "bins", cmd = "cargo clippy --bins --message-format=json -- -D warnings", bins_only = true }},
-  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', args = "--all-lints", slapslop = true }},
-  {{ name = "warm", cmd = "touch target/warmed", warm_only = true }},
+  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1', on_main = 'cargo-slapslop run "$PWD"', args = "--all-lints", slapslop = true }},
   {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
 ]
 "#,
@@ -141,6 +140,9 @@ fn codes(diags: &Value) -> Vec<&str> {
 fn checks_patches_against_warm_generations() {
     let warmd = Warmd::start();
     let base = warmd.head();
+    let hits = curl("GET", &format!("{}/repos/demo/hits", warmd.url), None).unwrap();
+    assert_eq!(hits["sha"], base);
+    assert!(hits["jobs"]["slapslop"].is_array());
 
     let patch = warmd.diff("printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
     let body = json!({
@@ -257,7 +259,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(job["result"], json!({ "outcome": "rebase_needed", "files": ["src/lib.rs"] }));
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
-    assert_eq!(names(&job["result"]["jobs"]), ["clippy"]);
+    assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
     assert_eq!(job["result"]["ok_precise"], true);
     let comment = warmd.diff("sed -i '1i // note' src/lib.rs");
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));

@@ -5,8 +5,9 @@ url=${WARMD_URL:-http://dev-joshie.tail388b2e.ts.net:7878}
 
 usage() {
   cat >&2 <<'EOF'
-usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON] [--wait]
+usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON]
        warmd track [JOB_ID]
+       warmd hits [REPO] [JOB]
 EOF
   exit 2
 }
@@ -66,17 +67,25 @@ case $cmd in
     track "$id" "${full_id:-}"
     exit $?
     ;;
+  hits)
+    repo=${1:-$(basename "$(git remote get-url origin 2>/dev/null | normalize)")}
+    [[ -n $repo ]] || usage
+    curl -fsS "$url/repos/$repo/hits" | jq -r --arg job "${2:-}" '
+      "warmd: \(.jobs | to_entries | map(select($job == "" or .key == $job)) | map(.value | length) | add // 0) hits on \($repo) main \(.sha[:7])",
+      (.jobs | to_entries[] | select($job == "" or .key == $job) | select(.value | length > 0) |
+        "== \(.key) (\(.value | length))\n" + (.value | map(.rendered) | join("")))' --arg repo "$repo"
+    exit
+    ;;
   check) ;;
   *) usage ;;
 esac
 
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-full=false wait=false args_json='{}' skip='[]' only='[]'
+full=false args_json='{}' skip='[]' only='[]'
 while (($#)); do
   case $1 in
     --full) full=true ;;
-    --wait) wait=true ;;
     --args) args_json=$2; shift ;;
     --only) only=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$only"); shift ;;
     --skip) skip=$(jq -c --arg s "$2" '. + ($s | split(","))' <<<"$skip"); shift ;;
@@ -113,13 +122,9 @@ full_id=$(jq -r '.full_id // empty' <<<"$ids")
 printf '%s %s\n' "$id" "$full_id" >"$(last_file)"
 
 echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}"
-if ! $wait; then
-  if [[ -n $(git status --porcelain) ]]; then
-    echo "warmd: commit and push now so CI starts in parallel: git commit -am '...' && git push -u origin $branch"
-  elif [[ $branch != HEAD ]] && ! git diff --quiet "@{upstream}" 2>/dev/null; then
-    echo "warmd: push now so CI starts in parallel: git push -u origin $branch"
-  fi
-  echo "warmd: then get the result with: warmd track $id${full_id:+ $full_id}"
-  exit 0
+if [[ -n $(git status --porcelain) ]]; then
+  echo "warmd: commit and push now so CI starts in parallel: git commit -am '...' && git push -u origin $branch"
+elif [[ $branch != HEAD ]] && ! git diff --quiet "@{upstream}" 2>/dev/null; then
+  echo "warmd: push now so CI starts in parallel: git push -u origin $branch"
 fi
-track "$id" "$full_id"
+echo "warmd: then get the result with: warmd track $id${full_id:+ $full_id}"

@@ -50,12 +50,12 @@ pub(crate) struct Job {
     pub(crate) cmd: String,
     pub(crate) fix: Option<String>,
     pub(crate) on_patch: Option<String>,
+    /// What a main build runs instead of `cmd`; its hits are main's baseline (`warmd hits`).
+    pub(crate) on_main: Option<String>,
     #[serde(default)]
     pub(crate) args: String,
     #[serde(default)]
     pub(crate) slapslop: bool,
-    #[serde(default)]
-    pub(crate) warm_only: bool,
     #[serde(default)]
     pub(crate) bins_only: bool,
 }
