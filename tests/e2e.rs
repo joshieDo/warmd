@@ -264,6 +264,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
     assert_eq!(job["result"]["ok_precise"], true);
     assert!(job["result"]["jobs"][0]["rebuilt"].is_u64(), "{job:#}");
+    assert!(job["result"]["jobs"][0]["cpu_secs"].as_f64() > Some(0.0), "{job:#}");
     let comment = warmd.diff("sed -i '1i // note' src/lib.rs");
     let stale = json!({ "repo": "demo", "base": { "sha": gone }, "patch": comment, "session": "stale-base" });
     warmd.job("check", &stale);

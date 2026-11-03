@@ -118,6 +118,7 @@ const PHASE_KINDS = [
   { key: "slapslop", label: "slapslop", color: "#9b7bf0", test: n => /slapslop/.test(n) },
   { key: "fmt", label: "rustfmt", color: "#3fb27f", test: n => /fmt/.test(n) },
   { key: "git", label: "Git / copy", color: "#3aa7b8", test: n => /copy|fetch|clone|checkout|submodules|apply|commit/.test(n) },
+  { key: "wait", label: "Waiting (branch busy / no free slot)", color: "#e0a43a", test: n => /^queued$|^wait_branch$/.test(n) },
   { key: "other", label: "Setup", color: "#8a8f98", test: () => true },
 ];
 const phaseKind = name => PHASE_KINDS.find(k => k.test(name));
@@ -195,7 +196,9 @@ function recentDetail(i) {
     kv("Branch", esc(f.branch || "")) + kv("Kind", esc(j.kind)) + kv("Result", esc(res)) + kv("Finished", new Date(j.at * 1000).toLocaleString()) +
     kv("Total", dur(j.total_secs)) + kv("Layer", f.layer_bytes != null ? size(f.layer_bytes) : "") +
     (f.warmth ? kv("Session", f.warmth.session_reused ? "warm (reused)" : "<b>cold</b> (new or reset)") + (f.warmth.rebased ? kv("Rebased", "base was gone: ran on the current main") : "") +
-      kv("Crates rebuilt", Object.entries(f.warmth.rebuilt || {}).map(([k, v]) => esc(k) + " " + v).join(" · ") || "-") : "") +
+      kv("Crates rebuilt", Object.entries(f.warmth.rebuilt || {}).map(([k, v]) => esc(k) + " " + v).join(" · ") || "-") +
+      kv("CPU time", Object.entries(f.warmth.cpu_secs || {}).map(([k, v]) => esc(k) + " " + dur(v)).join(" · ") || "-") : "") +
+    (f.jobs ? kv("Main build jobs", Object.entries(f.jobs).map(([k, v]) => esc(k) + ": " + (v.rebuilt ?? "-") + " rebuilt, " + dur(v.cpu_secs) + " CPU, " + v.hits + " hits").join("<br>")) : "") +
     (f.load_at_start != null ? kv("Machine load at start", f.load_at_start.toFixed(1)) : "");
   const span = r => ({ start: r.at - r.total_secs, end: r.at });
   const me = span(j);

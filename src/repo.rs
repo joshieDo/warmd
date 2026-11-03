@@ -26,7 +26,7 @@ use tokio::{
 
 use crate::{
     config::{Job, RepoCfg},
-    diag::Diag,
+    diag::{self, Diag},
     metrics::{self, Clock, Phase},
     sandbox::{Sandbox, Tree},
     stats::now_secs,
@@ -317,8 +317,9 @@ impl Repo {
         if self.current().is_none_or(|current| current.sha != head) {
             self.set_status(State::Refreshing, &head, None, Vec::new());
             let mut clock = Clock::start();
-            let built = metrics::with_commands(self.build(&head, &mut clock)).await;
-            let fields = json!({ "repo": self.name, "sha": head, "ok": built.is_ok() });
+            let mut stats = BTreeMap::new();
+            let built = metrics::with_commands(self.build(&head, &mut clock, &mut stats)).await;
+            let fields = json!({ "repo": self.name, "sha": head, "ok": built.is_ok(), "jobs": stats });
             metrics::record(&self.metrics_file, "build", fields, &clock).await;
             let phases = clock.into_phases();
             match built {
@@ -351,7 +352,7 @@ impl Repo {
         .to_owned())
     }
 
-    async fn build(&self, sha: &str, clock: &mut Clock) -> anyhow::Result<Gen> {
+    async fn build(&self, sha: &str, clock: &mut Clock, stats: &mut BTreeMap<String, Value>) -> anyhow::Result<Gen> {
         let dir = self.gens_dir.join(sha);
         let tmp = self.gens_dir.join(format!("{sha}.tmp"));
         remove_tree(&tmp).await?;
@@ -380,6 +381,10 @@ impl Repo {
                 sandbox.diagnose(&job, &job.render(job.on_main.as_ref().unwrap_or(&job.cmd), None)).await?;
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));
+            stats.insert(
+                job.name.clone(),
+                json!({ "rebuilt": diag::rebuilt(&out.stdout), "cpu_secs": out.cpu_secs, "hits": found.len() }),
+            );
             baseline.insert(job.name, found);
         }
         rename(&tmp, &dir).await?;

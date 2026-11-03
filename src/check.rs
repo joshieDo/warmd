@@ -138,6 +138,7 @@ impl Report {
             "main_moved": self.main_moved,
             "rebuilt": self.jobs.iter().filter_map(|job| Some((job.name.clone(), job.rebuilt?))).collect::<BTreeMap<_, _>>(),
             "new": self.jobs.iter().map(|job| (job.name.clone(), job.new.len())).collect::<BTreeMap<_, _>>(),
+            "cpu_secs": self.jobs.iter().filter_map(|job| Some((job.name.clone(), job.cpu_secs?))).collect::<BTreeMap<_, _>>(),
         })
     }
 
@@ -201,6 +202,7 @@ struct JobResult {
     output: Option<String>,
     custom_args: bool,
     rebuilt: Option<u32>,
+    cpu_secs: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +335,7 @@ pub(crate) async fn run(
     let (layer, session_guard) = match session_name.clone() {
         Some(name) => {
             let (dir, guard) = repo.session(&name).await;
+            clock.mark("wait_branch");
             (dir, Some(guard))
         }
         None => (layer.to_owned(), None),
@@ -553,6 +556,7 @@ async fn check(
             output,
             custom_args: custom.is_some(),
             rebuilt: diag::rebuilt(&out.stdout),
+            cpu_secs: out.cpu_secs,
         });
         clock.mark(format!("job:{}", job.name));
     }

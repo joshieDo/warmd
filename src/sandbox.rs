@@ -103,12 +103,13 @@ impl Sandbox<'_> {
             code: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            cpu_secs: None,
         })
     }
 
     pub(crate) async fn diagnose(self, job: &Job, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
         if !job.slapslop {
-            let out = self.run(cmd, None).await?;
+            let out = self.run_described(cmd, &timed(cmd), None).await?.with_cpu();
             let found = diag::parse(&out.stdout);
             return Ok((out, found));
         }
@@ -116,7 +117,10 @@ impl Sandbox<'_> {
     }
 
     pub(crate) async fn slapslop(self, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
-        let out = self.run_described(cmd, &format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl && {cmd}"), None).await?;
+        let out = self
+            .run_described(cmd, &timed(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl && {cmd}")), None)
+            .await?
+            .with_cpu();
         Ok((
             out,
             diag::parse(
@@ -137,9 +141,38 @@ pub(crate) struct Output {
     pub(crate) code: Option<i32>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    /// User plus system CPU seconds of the command and everything it ran (the shell's `times`).
+    pub(crate) cpu_secs: Option<f64>,
+}
+
+const TIMES_MARK: &str = "warmd-cpu:";
+
+/// The command, then its children's CPU times on stdout after a marker, keeping its exit status.
+fn timed(cmd: &str) -> String {
+    format!(
+        "{{ {cmd}
+}}; warmd_status=$?; printf '\n{TIMES_MARK}'; times; exit $warmd_status"
+    )
+}
+
+/// `1m2.500000s` as seconds.
+fn shell_secs(text: &str) -> Option<f64> {
+    let (minutes, seconds) = text.strip_suffix('s')?.split_once('m')?;
+    Some(minutes.parse::<f64>().ok()?.mul_add(60.0, seconds.parse::<f64>().ok()?))
 }
 
 impl Output {
+    /// Takes the CPU line `timed` printed off stdself.
+    fn with_cpu(mut self) -> Self {
+        if let Some((rest, line)) = self.stdout.rsplit_once(&format!("\n{TIMES_MARK}")) {
+            // The shell's times line comes first, then its children's: the job is the last one.
+            self.cpu_secs =
+                line.lines().last().map(|children| children.split_whitespace().filter_map(shell_secs).sum());
+            self.stdout = rest.to_owned();
+        }
+        self
+    }
+
     pub(crate) const fn ok(&self) -> bool {
         matches!(self.code, Some(0))
     }
