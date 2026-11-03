@@ -28,7 +28,7 @@ clippy = "cargo clippy --locked --message-format=json"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --locked --workspace --lib --bins --tests --message-format=json -- -D warnings", fix = "cargo clippy --locked --workspace --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
-  { name = "slapslop", cmd = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run .", on_patch = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run . --diff HEAD~1", slapslop = true },
+  { name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', slapslop = true },
   { name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {packages}" },
 ]
 
