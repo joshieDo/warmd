@@ -69,9 +69,6 @@ jq -r '.result.profiles | to_entries[] | select((.value | length) > 0) |
   "== profile \(.key)\n" + (.value | map(.rendered) | join(""))' <<<"$job"
 if $fix; then
   jq -r '.result.fix_patch // empty' <<<"$job" | git apply --allow-empty
-  echo "warmd: fixes applied to the working tree, not committed; hazy hits are never applied:" >&2
-  jq -r '[.result.jobs[].new[] | select(.hazy)] | if length == 0 then "  none" else map("  \(.file):\(.line) \(.message)") | join("
-") end' <<<"$job" >&2
 fi
 ok=$(jq -r .result.ok <<<"$job")
 [[ $ok == true ]] && echo "warmd: ok" >&2
