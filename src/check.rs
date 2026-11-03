@@ -124,6 +124,7 @@ pub(crate) struct Report {
     rebased_from: Option<String>,
     main_moved: bool,
     jobs: Vec<JobResult>,
+    not_run: Vec<String>,
     full: Option<FullReport>,
     fix_patch: Option<String>,
 }
@@ -135,6 +136,9 @@ impl Report {
             .as_ref()
             .filter(|full| !full.hits.is_empty())
             .map_or_else(String::new, |full| format!(" (full: {} advisory)", full.hits.len()));
+        if self.ok && !self.not_run.is_empty() {
+            return format!("ok (partial: {} not run){full}", self.not_run.join(", "));
+        }
         if self.ok {
             return format!("ok{full}");
         }
@@ -460,6 +464,18 @@ async fn check(
     let packages = Scope::flags(&scope.touched);
 
     let all_jobs = &cfg.jobs;
+    let not_run = if req.full_only {
+        Vec::new()
+    } else {
+        all_jobs
+            .iter()
+            .filter(|job| {
+                req.skip.iter().any(|key| job.answers_to(key, all_jobs))
+                    || !(req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
+            })
+            .map(|job| job.name.clone())
+            .collect()
+    };
     let mut planned = Vec::with_capacity(all_jobs.len());
     for job in all_jobs.iter().filter(|job| {
         !req.full_only
@@ -534,6 +550,7 @@ async fn check(
         rebased_from,
         main_moved,
         jobs,
+        not_run,
         full,
         fix_patch,
     }))

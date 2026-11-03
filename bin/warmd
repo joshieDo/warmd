@@ -57,7 +57,7 @@ show_jobs() {
 }
 
 track() {
-  local id=$1 full_id=${2:-} job ok fulljob
+  local id=$1 full_id=${2:-} job ok fulljob not_run
   push_nudge
   echo "warmd: waiting for job $id" >&2
   job=$(wait_job "$id")
@@ -66,7 +66,15 @@ track() {
     return 1
   fi
   ok=$(jq -r .result.ok <<<"$job")
-  if [[ $ok == true ]]; then echo "warmd: CI ok" >&2; else echo "warmd: CI found issues (these must be fixed to merge)" >&2; fi
+  not_run=$(jq -r '.result.not_run // [] | join(", ")' <<<"$job")
+  if [[ $ok == true && -n $not_run ]]; then
+    echo "warmd: ok (partial: $not_run not run). Not CI ok: run warmd check without --only/--skip before you push or open a PR." >&2
+    ok=partial
+  elif [[ $ok == true ]]; then
+    echo "warmd: CI ok" >&2
+  else
+    echo "warmd: CI found issues (these must be fixed to merge)" >&2
+  fi
   if [[ -n $full_id ]]; then
     echo "warmd: waiting for the full set (job $full_id, advisory)" >&2
     fulljob=$(wait_job "$full_id")
