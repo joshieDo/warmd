@@ -176,7 +176,8 @@ fn checks_patches_against_warm_generations() {
     assert!(phases.contains(&"job:clippy"), "{phases:?}");
     let full_phases =
         full_job["phases"].as_array().unwrap().iter().map(|phase| phase["name"].as_str().unwrap()).collect::<Vec<_>>();
-    assert!(full_phases.contains(&"full"), "{full_phases:?}");
+    assert!(full_phases.contains(&"full:slapslop"), "{full_phases:?}");
+    assert!(full_phases.contains(&"full:clippy"), "{full_phases:?}");
     assert!(!full_phases.contains(&"job:clippy"), "{full_phases:?}");
 
     let mut body = body;

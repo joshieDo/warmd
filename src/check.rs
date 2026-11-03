@@ -455,9 +455,9 @@ async fn check(
         let mut hits = Vec::new();
         for step in &full.steps {
             hits.extend(run_step(sandbox, step, repo, &packages).await?);
+            clock.mark(step.label());
         }
         hits.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
-        clock.mark("full");
         Some(FullReport { notice: FULL_NOTICE, hits })
     } else {
         None

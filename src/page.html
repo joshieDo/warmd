@@ -53,6 +53,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .parts { margin: 4px 0 0; font-size: 12px; }
 .detail section { margin-bottom: 18px; } .kv { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
 .timeline { position: relative; margin: 8px 0 22px; } .lane { position: relative; height: 22px; margin: 4px 0; background: var(--fill); border-radius: 4px; } .seg { position: absolute; top: 0; bottom: 0; border-radius: 3px; } .lane-label { position: absolute; right: 6px; top: 3px; font-size: 11px; color: var(--muted); mix-blend-mode: difference; } .ticks { position: relative; height: 14px; font-size: 11px; color: var(--muted); } .ticks span { position: absolute; transform: translateX(-50%); } .ticks span:first-child { transform: none; } .ticks span:last-child { transform: translateX(-100%); } .legend { display: flex; gap: 14px; margin-bottom: 14px; font-size: 12px; color: var(--muted); } .leg i, .dotc { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; } .step { padding: 6px 0; border-bottom: 1px solid var(--line); } .cmd { margin: 4px 0 0 15px; padding: 6px 8px; background: var(--fill); border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 120px; overflow: auto; }
+.step-head { display: grid; grid-template-columns: 14px 180px 60px 1fr; gap: 8px; align-items: baseline; } .cmd1 { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -89,7 +90,7 @@ const chips = list => (list || []).map(x => '<span class="chip">' + esc(x) + '</
 const argsHtml = args => Object.entries(args || {}).map(([job, o]) => '<div><b>' + esc(job) + '</b> ' + (o.replace ? 'replace ' + chips(o.replace) : '') + (o.add && o.add.length ? ' add ' + chips(o.add) : '') + '</div>').join("");
 const yes = b => b ? "yes" : "";
 const time = t => t ? new Date(t * 1000).toLocaleTimeString() : "";
-const phaseColor = name => /^job:clippy|^clippy/.test(name) ? "#4f8cff" : /slapslop/.test(name) ? "#a970ff" : /fmt/.test(name) ? "#2fbf71" : name === "full" ? "#ff9f43" : /copy|fetch|clone|checkout|submodules/.test(name) ? "#20c4c4" : "#7d7d7d";
+const phaseColor = name => /clippy/.test(name) ? "#4f8cff" : /slapslop/.test(name) ? "#a970ff" : /fmt/.test(name) ? "#2fbf71" : name === "full" ? "#ff9f43" : /copy|fetch|clone|checkout|submodules/.test(name) ? "#20c4c4" : "#7d7d7d";
 function timelineHtml(jobs) {
   const t0 = Math.min(...jobs.map(j => j.start)), t1 = Math.max(...jobs.map(j => j.start + j.total));
   const span = Math.max(t1 - t0, 0.001);
@@ -106,8 +107,9 @@ function timelineHtml(jobs) {
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => '<span style="left:' + (f * 100) + '%">' + dur(span * f) + '</span>').join("");
   const legend = [["clippy", "job:clippy"], ["slapslop", "job:slapslop"], ["fmt", "job:fmt"], ["full", "full"], ["git/copy", "copy"], ["other", "setup"]].map(([l, n]) => '<span class="leg"><i style="background:' + phaseColor(n) + '"></i>' + l + '</span>').join("");
   const steps = jobs.flatMap(j => j.phases.filter(p => p.secs >= 0.05 || p.commands.length).map(p =>
-    '<div class="step"><div><i class="dotc" style="background:' + phaseColor(p.name) + '"></i><b>' + esc(p.name) + '</b> <span class="muted">' + esc(jobs.length > 1 ? j.label + " · " : "") + dur(p.secs) + '</span></div>' +
-    (p.commands || []).map(c => '<pre class="cmd"><code>' + esc(c) + '</code></pre>').join("") + '</div>')).join("");
+    '<div class="step"><div class="step-head"><i class="dotc" style="background:' + phaseColor(p.name) + '"></i><b>' + esc(p.name) + '</b><span class="muted">' + esc(jobs.length > 1 ? j.label + " / " : "") + dur(p.secs) + '</span>' +
+    ((p.commands || []).length ? '<code class="cmd1" title="' + esc(p.commands.join("\n")) + '">' + esc(p.commands[p.commands.length - 1].split("\n")[0]) + '</code>' : '<span class="muted">no command recorded</span>') + '</div>' +
+    ((p.commands || []).length > 1 || (p.commands[0] || "").includes("\n") ? '<details><summary class="muted">all ' + p.commands.length + ' commands</summary>' + p.commands.map(c => '<pre class="cmd"><code>' + esc(c) + '</code></pre>').join("") + '</details>' : '') + '</div>')).join("");
   return '<div class="timeline">' + rows + '<div class="ticks">' + ticks + '</div></div><div class="legend">' + legend + '</div><div class="steps">' + steps + '</div>';
 }
 function detailHtml(head, f, req, timeline) {

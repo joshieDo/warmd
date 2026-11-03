@@ -109,6 +109,16 @@ pub(crate) enum Step {
     },
 }
 
+impl Step {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Slapslop { .. } => "full:slapslop".to_owned(),
+            Self::Clippy { targets, .. } if targets.contains("--lib --bins") => "full:clippy-non-test".to_owned(),
+            Self::Clippy { .. } => "full:clippy".to_owned(),
+        }
+    }
+}
+
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     from_str(&(fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?))
         .with_context(|| format!("parsing {}", path.display()))

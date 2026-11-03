@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::OsStr,
     fs,
     io::ErrorKind,
+    iter::once,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -565,6 +567,10 @@ async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 async fn checked(cmd: &mut Command) -> anyhow::Result<String> {
+    let std = cmd.as_std();
+    metrics::note_command(
+        &once(std.get_program()).chain(std.get_args()).map(OsStr::to_string_lossy).collect::<Vec<_>>().join(" "),
+    );
     let out = cmd.output().await.with_context(|| format!("starting {:?}", cmd.as_std()))?;
     if !out.status.success() {
         bail!("{:?} failed: {}", cmd.as_std(), String::from_utf8_lossy(&out.stderr).trim());
