@@ -15,6 +15,16 @@ EOF
 normalize() { sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#/$##'; }
 last_file() { printf '%s/warmd-last' "$(git rev-parse --git-dir)"; }
 
+push_nudge() {
+  local branch
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || return 0
+  if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    echo "warmd: commit and push now so CI starts in parallel: git commit -am '...' && git push -u origin $branch" >&2
+  elif [[ $branch != HEAD ]] && ! git diff --quiet "@{upstream}" 2>/dev/null; then
+    echo "warmd: push now so CI starts in parallel: git push -u origin $branch" >&2
+  fi
+}
+
 wait_job() {
   local job state
   while :; do
@@ -33,6 +43,7 @@ wait_job() {
 
 track() {
   local id=$1 full_id=${2:-} job ok fulljob
+  push_nudge
   echo "warmd: waiting for job $id" >&2
   job=$(wait_job "$id")
   if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
@@ -121,10 +132,7 @@ id=$(jq -r .id <<<"$ids")
 full_id=$(jq -r '.full_id // empty' <<<"$ids")
 printf '%s %s\n' "$id" "$full_id" >"$(last_file)"
 
-echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}"
-if [[ -n $(git status --porcelain) ]]; then
-  echo "warmd: commit and push now so CI starts in parallel: git commit -am '...' && git push -u origin $branch"
-elif [[ $branch != HEAD ]] && ! git diff --quiet "@{upstream}" 2>/dev/null; then
-  echo "warmd: push now so CI starts in parallel: git push -u origin $branch"
-fi
-echo "warmd: then get the result with: warmd track $id${full_id:+ $full_id}"
+echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}" >&2
+push_nudge
+echo "warmd: then get the result with: warmd track (job id on stdout)" >&2
+echo "$id${full_id:+ $full_id}"
