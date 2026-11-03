@@ -77,6 +77,10 @@ impl Sandbox<'_> {
             }
         }
         bwrap.args(["--setenv", "SLAPSLOP_CACHE", &format!("{work}/{SLAPSLOP_CACHE}")]);
+        if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
+            create_dir_all(&remote).await?;
+            bwrap.arg("--bind").arg(&remote).arg(&remote).arg("--setenv").arg("SLAPSLOP_REMOTE_CACHE").arg(&remote);
+        }
         bwrap.args(["--chdir", &work, "sh", "-c", cmd]);
         bwrap.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         bwrap.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
