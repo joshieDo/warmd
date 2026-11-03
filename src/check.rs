@@ -53,6 +53,8 @@ pub(crate) struct Request {
     #[serde(default)]
     args: BTreeMap<String, ArgsOverride>,
     session: Option<String>,
+    #[serde(default)]
+    skip: Vec<String>,
     #[serde(skip)]
     baseline_only: bool,
     #[serde(skip)]
@@ -295,7 +297,7 @@ async fn check(
     if let Some(asked) = &req.base.branch {
         ensure!(asked == branch, "{asked} is not tracked for {}, only {branch}", repo.name());
     }
-    if let Some(key) = req.args.keys().find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key))) {
+    if let Some(key) = req.args.keys().chain(&req.skip).find(|key| !cfg.jobs.iter().any(|job| job.answers_to(key))) {
         bail!("no job of {} answers to {key}", repo.name());
     }
     let current = repo.current().with_context(|| format!("{} has no generation yet", repo.name()))?;
@@ -371,7 +373,10 @@ async fn check(
 
     let all_jobs = &cfg.jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
-    for job in all_jobs.iter().filter(|job| !job.warm_only && !req.full_only) {
+    for job in all_jobs
+        .iter()
+        .filter(|job| !job.warm_only && !req.full_only && !req.skip.iter().any(|key| job.answers_to(key)))
+    {
         let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
                 Some(cmd) => cmd,

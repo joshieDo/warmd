@@ -182,6 +182,11 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &body);
     let report = &job["result"];
     assert_eq!(report["jobs"][0]["custom_args"], true);
+    let mut skipped = body.clone();
+    skipped["skip"] = json!(["slapslop"]);
+    skipped["args"] = json!({});
+    let job = warmd.job("check", &skipped);
+    assert!(!names(&job["result"]["jobs"]).contains(&"slapslop"), "{job:#}");
     assert!(codes(&report["jobs"][0]["new"]).contains(&"clippy::must_use_candidate"), "{report:#}");
     assert!(codes(&report["jobs"][1]["new"]).iter().all(|code| *code == "wide_tuple"), "{report:#}");
 
