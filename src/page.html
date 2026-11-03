@@ -90,7 +90,7 @@ function tree(i) {
   const checkNode = c => {
     const f = c.fields, res = String(f.result ?? "");
     const name = f.branch ? esc(f.branch) : f.base ? 'base <code>' + esc(String(f.base).slice(0, 7)) + '</code>' : 'check';
-    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
+    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" || res === "built" ? "ok" : "refreshing";
     return node(name, esc(res.slice(0, 80)) + ' · ' + size(f.layer_bytes) + ' · ' + dur(c.total_secs) + ' · ' + ago(c.at), cls) + '</li>';
   };
   const items = gens.map((g, n) => {
@@ -133,8 +133,8 @@ async function load() {
   if (open != null) tree(open);
   $("jobs").innerHTML = s.recent.map(j => {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
-    const res = String(j.fields.result ?? (j.fields.ok ? "ok" : "failed"));
-    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
+    const res = String(j.fields.result ?? (j.kind === "build" ? (j.fields.ok ? "built" : "failed") : j.fields.ok ? "ok" : "failed"));
+    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" || res === "built" ? "ok" : "refreshing";
     const repo = last.repos.find(r => r.name === j.fields.repo), sha = String(j.fields.base ?? j.fields.sha ?? "");
     const label = sha ? '<code>' + esc(sha.slice(0, 7)) + (j.fields.dirty ? '-dirty' : '') + '</code>' : '<span class="muted">–</span>';
     const commit = sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;

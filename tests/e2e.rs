@@ -263,6 +263,7 @@ fn checks_patches_against_warm_generations() {
     assert!(stats["repos"][0]["view"]["gens"][0]["expires_in_secs"].is_u64(), "{stats:#}");
     assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");
     assert!(!stats["recent"].as_array().unwrap().is_empty(), "{stats:#}");
+    assert!(stats["recent"].as_array().unwrap().iter().any(|job| job["kind"] == "build"), "{stats:#}");
     let checks = stats["repos"][0]["checks"].as_array().unwrap();
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
