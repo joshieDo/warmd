@@ -177,22 +177,37 @@ async fn check(
         return Ok(Outcome::SlapslopBaseline { baseline: out.stdout });
     }
 
-    let all_jobs = repo.cfg().all_jobs();
+    let added = diag::added_lines(&req.patch);
+    let needs_crates = !extra.is_empty() || repo.cfg().jobs.iter().any(|job| job.on_patch.is_some());
+    let packages = if needs_crates {
+        let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
+        let crates = touched_crates(&metadata.stdout, &sandbox::work_path(repo.name()), added.keys())?;
+        clock.mark("metadata");
+        crates.iter().map(|krate| format!("-p {krate}")).collect::<Vec<_>>().join(" ")
+    } else {
+        String::new()
+    };
+
+    let all_jobs = &repo.cfg().jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
-    for job in &all_jobs {
-        let (out, found) = sandbox.diagnose(job).await?;
+    for job in all_jobs {
+        let cmd = match &job.on_patch {
+            None => job.cmd.clone(),
+            Some(_) if packages.is_empty() => continue,
+            Some(scoped) => scoped.replace("{packages}", &packages),
+        };
+        let (out, found) = sandbox.diagnose_cmd(job, &cmd).await?;
         let output = (!out.ok() && found.is_empty()).then(|| out.tail());
         let new = diag::new_only(found, generation.baseline(&job.name));
         jobs.push(JobResult { name: job.name.clone(), exit: out.code, new, output });
         clock.mark(format!("job:{}", job.name));
     }
 
-    let added = diag::added_lines(&req.patch);
     let mut hits = BTreeMap::new();
     for (name, profile) in extra {
         let mut found = Vec::new();
         for step in &profile.steps {
-            found.extend(run_step(sandbox, step, repo, &added).await?);
+            found.extend(run_step(sandbox, step, repo, &packages).await?);
         }
         found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
         hits.insert(name.clone(), found);
@@ -215,20 +230,12 @@ async fn check(
     Ok(Outcome::Checked(report))
 }
 
-async fn run_step(
-    sandbox: Sandbox<'_>,
-    step: &Step,
-    repo: &Repo,
-    added: &BTreeMap<String, BTreeSet<u32>>,
-) -> anyhow::Result<Vec<Diag>> {
+async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str) -> anyhow::Result<Vec<Diag>> {
     match step {
         Step::Clippy { targets, args, conf_dir } => {
-            let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
-            let crates = touched_crates(&metadata.stdout, &sandbox::work_path(repo.name()), added.keys())?;
-            if crates.is_empty() {
+            if packages.is_empty() {
                 return Ok(Vec::new());
             }
-            let packages = crates.iter().map(|krate| format!("-p {krate}")).collect::<Vec<_>>().join(" ");
             let conf =
                 conf_dir.as_ref().map_or_else(String::new, |dir| format!("CLIPPY_CONF_DIR='{}' ", dir.display()));
             let cmd = format!("{conf}{} {targets} {packages} -- {}", repo.cfg().clippy, args.join(" "));

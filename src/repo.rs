@@ -193,7 +193,7 @@ impl Repo {
         clock.mark("submodules");
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build(&tmp) };
         let mut baseline = Baseline::new();
-        for job in self.cfg.all_jobs() {
+        for job in self.cfg.jobs.clone() {
             let (out, found) = sandbox.diagnose(&job).await?;
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));

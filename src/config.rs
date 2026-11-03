@@ -29,21 +29,8 @@ pub(crate) struct RepoCfg {
     #[serde(default = "default_branch")]
     pub(crate) branch: String,
     pub(crate) jobs: Vec<Job>,
-    pub(crate) slapslop: Option<String>,
     #[serde(default = "default_clippy")]
     pub(crate) clippy: String,
-}
-
-impl RepoCfg {
-    pub(crate) fn all_jobs(&self) -> Vec<Job> {
-        let slapslop = self.slapslop.iter().map(|cmd| Job {
-            name: "slapslop".to_owned(),
-            cmd: cmd.clone(),
-            fix: None,
-            slapslop: true,
-        });
-        self.jobs.iter().cloned().chain(slapslop).collect()
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,7 +39,8 @@ pub(crate) struct Job {
     pub(crate) name: String,
     pub(crate) cmd: String,
     pub(crate) fix: Option<String>,
-    #[serde(skip)]
+    pub(crate) on_patch: Option<String>,
+    #[serde(default)]
     pub(crate) slapslop: bool,
 }
 

@@ -8,7 +8,7 @@ jobs = [
   { name = "clippy-runtime", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --bins --all-features --locked --message-format=json" },
   { name = "clippy-tests", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --tests --all-features --locked --message-format=json" },
   { name = "clippy-benches", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --benches --examples --all-features --locked --message-format=json" },
-  { name = "fmt", cmd = "cargo +nightly fmt --all --check" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
 [repos.reth]
@@ -17,7 +17,7 @@ clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --me
 jobs = [
   { name = "clippy-all-features", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --all-features --locked --message-format=json" },
   { name = "clippy", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --locked --message-format=json" },
-  { name = "fmt", cmd = "cargo +nightly fmt --all --check" },
+  { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
 [repos.slapslop]
@@ -26,9 +26,9 @@ clippy = "cargo clippy --locked --message-format=json"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --locked --workspace --lib --bins --tests --message-format=json -- -D warnings", fix = "cargo clippy --locked --workspace --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
-  { name = "fmt", cmd = "cargo fmt --all --check" },
+  { name = "slapslop", cmd = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run .", slapslop = true },
+  { name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {packages}" },
 ]
-slapslop = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run ."
 
 [repos.warmd]
 url = "https://github.com/joshieDo/warmd"
@@ -36,6 +36,6 @@ clippy = "cargo clippy --locked --message-format=json"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --all-targets --all-features --locked --message-format=json", fix = "cargo clippy --all-targets --all-features --locked --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", cmd = "cargo clippy --bins --all-features --locked --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
-  { name = "fmt", cmd = "cargo fmt --check" },
+  { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true },
+  { name = "fmt", cmd = "cargo fmt --check", on_patch = "cargo fmt --check {packages}" },
 ]
-slapslop = 'cargo-slapslop run "$PWD" --all-lints'

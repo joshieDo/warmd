@@ -46,8 +46,11 @@ poll_secs = 3600
 
 [repos.demo]
 url = "file://{root}/demo.git"
-jobs = [{{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }}]
-slapslop = 'cargo-slapslop run "$PWD" --all-lints'
+jobs = [
+  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
+  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true }},
+  {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
+]
 "#,
             state = root.join("state").display(),
             root = root.display(),
@@ -123,6 +126,10 @@ fn curl(method: &str, url: &str, body: Option<&Value>) -> Option<Value> {
     out.status.success().then(|| from_slice(&out.stdout).unwrap())
 }
 
+fn names(jobs: &Value) -> Vec<&str> {
+    jobs.as_array().unwrap().iter().map(|job| job["name"].as_str().unwrap()).collect()
+}
+
 fn codes(diags: &Value) -> Vec<&str> {
     diags.as_array().unwrap().iter().map(|diag| diag["code"].as_str().unwrap_or_default()).collect()
 }
@@ -140,6 +147,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(report["outcome"], "checked");
     assert_eq!(report["ok"], false);
     assert_eq!(report["main_moved"], false);
+    assert_eq!(names(&report["jobs"]), ["clippy", "slapslop", "fmt"]);
     assert_eq!(codes(&report["jobs"][0]["new"]), ["clippy::ptr_arg"]);
     let slapslop = report["jobs"][1]["new"].as_array().unwrap();
     assert!(slapslop.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{slapslop:#?}");
@@ -175,6 +183,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(job["result"], json!({ "outcome": "rebase_needed", "files": ["src/lib.rs"] }));
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
+    assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
 
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
