@@ -51,6 +51,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .tree ul li::after { content: ""; position: absolute; left: 0; top: 13px; width: 10px; border-top: 1px solid var(--line); }
 .node { font-weight: 500; }
 .parts { margin: 4px 0 0; font-size: 12px; }
+.detail section { margin-bottom: 18px; } .kv { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -79,9 +80,51 @@ const stat = (label, value, sub, extra = "") => '<div class="card stat"><h2>' + 
 const cores = list => '<div class="cores">' + list.map((p, i) => '<div title="cpu' + i + ' ' + p.toFixed(0) + '%"><div style="height:' + Math.min(p, 100).toFixed(0) + '%"></div></div>').join("") + '</div>';
 const bar = p => '<div class="bar"><div style="width:' + Math.min(p, 100).toFixed(1) + '%"></div></div>';
 const dot = s => '<span class="dot ' + esc(s) + '"></span>';
-let last = null, open = null;
+let last = null, open = null, commitLink = () => "";
 const size = b => b == null ? "…" : gb(b);
 const parts = g => (g.parts || []).map(p => '<span class="chip">[' + p.jobs.map(esc).join(", ") + '] ' + gb(p.bytes) + '</span>').join("");
+const kv = (label, value) => value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length) || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) ? "" : '<div class="kv"><span class="muted">' + esc(label) + '</span><span>' + value + '</span></div>';
+const chips = list => (list || []).map(x => '<span class="chip">' + esc(x) + '</span>').join("");
+const argsHtml = args => Object.entries(args || {}).map(([job, o]) => '<div><b>' + esc(job) + '</b> ' + (o.replace ? 'replace ' + chips(o.replace) : '') + (o.add && o.add.length ? ' add ' + chips(o.add) : '') + '</div>').join("");
+const yes = b => b ? "yes" : "";
+const time = t => t ? new Date(t * 1000).toLocaleTimeString() : "";
+function detailHtml(head, f, req, phases) {
+  const total = (phases || []).reduce((a, p) => a + p.secs, 0) || 1;
+  const bars = (phases || []).filter(p => p.secs >= 0.05).map(p => '<div class="phase"><span>' + esc(p.name) + '</span><div class="bar"><div style="width:' + (p.secs * 100 / total).toFixed(1) + '%"></div></div><span class="muted">' + dur(p.secs) + '</span></div>').join("");
+  return '<div class="detail">' +
+    '<section><h2>Job</h2>' + head + '</section>' +
+    '<section><h2>Request</h2>' +
+      kv("Session", esc(req.session || "")) + kv("Full set", yes(req.full || req.full_only)) + kv("Only", chips(req.only)) + kv("Skip", chips(req.skip)) +
+      kv("Args", argsHtml(req.args)) + kv("Fix patch", yes(req.fix)) + kv("Own slapslop baseline", yes(req.slapslop_baseline)) +
+      kv("Patch", req.patch_lines != null ? req.patch_files + " files, " + req.patch_lines + " lines" : "") +
+      (Object.keys(req).length ? "" : '<div class="muted">Not recorded for jobs before this change.</div>') +
+    '</section>' +
+    (bars ? '<section><h2>Phases</h2>' + bars + '</section>' : '') +
+  '</div>';
+}
+function liveDetail(i) {
+  const j = last.live[i];
+  if (!j) return;
+  open = null;
+  $("modal-title").textContent = [j.repo, j.kind, j.branch].filter(Boolean).join(" / ");
+  const head = kv("Repo", esc(j.repo)) + kv("Commit", commitLink(j.repo, j.base, true)) + kv("Branch", esc(j.branch || "")) + kv("Kind", esc(j.kind)) +
+    kv("Queued at", time(j.started)) + kv("Running", j.running_since ? "since " + time(j.running_since) + " (" + dur(Date.now() / 1000 - j.running_since) + ")" : "queued");
+  $("modal-body").innerHTML = detailHtml(head, {}, j.request || {}, []);
+  $("modal").hidden = false;
+}
+function recentDetail(i) {
+  const j = last.recent[i];
+  if (!j) return;
+  open = null;
+  const f = j.fields || {};
+  $("modal-title").textContent = [f.repo, j.kind, f.branch].filter(Boolean).join(" / ");
+  const res = String(f.result ?? (j.kind === "build" ? (f.ok ? "built" : "failed") : ""));
+  const head = kv("Repo", esc(f.repo)) + kv("Commit", commitLink(f.repo, f.base || f.sha, f.dirty)) + kv("Ran on", f.ran_on && f.ran_on !== f.base ? commitLink(f.repo, f.ran_on, false) : "") +
+    kv("Branch", esc(f.branch || "")) + kv("Kind", esc(j.kind)) + kv("Result", esc(res)) + kv("Finished", new Date(j.at * 1000).toLocaleString()) +
+    kv("Total", dur(j.total_secs)) + kv("Layer", f.layer_bytes != null ? size(f.layer_bytes) : "");
+  $("modal-body").innerHTML = detailHtml(head, f, f.request || {}, j.phases);
+  $("modal").hidden = false;
+}
 function tree(i) {
   open = i;
   const r = last.repos[i], gens = [...r.view.gens].reverse();
@@ -107,22 +150,6 @@ function tree(i) {
   $("modal").hidden = false;
 }
 function closeTree() { open = null; $("modal").hidden = true; }
-function liveDetail(i) {
-  const j = last.live[i];
-  if (!j) return;
-  open = null;
-  $("modal-title").textContent = [j.repo, j.kind, j.branch].filter(Boolean).join(" / ");
-  $("modal-body").innerHTML = '<pre style="white-space:pre-wrap"><code>' + esc(JSON.stringify({ base: j.base, started: new Date(j.started * 1000).toLocaleTimeString(), running_since: j.running_since && new Date(j.running_since * 1000).toLocaleTimeString(), ...j.request }, null, 2)) + '</code></pre>';
-  $("modal").hidden = false;
-}
-function recentDetail(i) {
-  const j = last.recent[i];
-  if (!j) return;
-  open = null;
-  $("modal-title").textContent = [j.fields.repo, j.kind, j.fields.branch].filter(Boolean).join(" / ");
-  $("modal-body").innerHTML = '<pre style="white-space:pre-wrap"><code>' + esc(JSON.stringify({ at: new Date(j.at * 1000).toLocaleString(), total_secs: j.total_secs, ...j.fields, phases: j.phases }, null, 2)) + '</code></pre>';
-  $("modal").hidden = false;
-}
 document.addEventListener("click", e => {
   const row = e.target.closest("tr.click");
   if (e.target.closest("a")) return;
@@ -151,7 +178,7 @@ async function load() {
     return '<tr class="click" data-repo="' + i + '"><td><b>' + esc(r.name) + '</b></td><td>' + dot(st.state) + esc(st.state) + (st.error ? '<div class="muted">' + esc(st.error.slice(-160)) + '</div>' : "") + '</td><td>' + link + '</td><td>' + disk + '</td><td>' + build + '</td></tr>';
   }).join("");
   if (open != null) tree(open);
-  const commitLink = (repoName, sha, dirty) => {
+  commitLink = (repoName, sha, dirty) => {
     const repo = last.repos.find(r => r.name === repoName);
     const label = '<code>' + esc(String(sha).slice(0, 7)) + (dirty ? '-dirty' : '') + '</code>';
     return sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
