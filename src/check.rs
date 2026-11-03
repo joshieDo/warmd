@@ -9,7 +9,7 @@ use serde_json::{from_str, json};
 use tokio::fs::create_dir_all;
 
 use crate::{
-    config::{Profile, Step},
+    config::{ArgsOverride, Profile, Step},
     diag::{self, Diag},
     metrics::{self, Clock, Phase},
     repo::{self, Repo},
@@ -31,6 +31,8 @@ pub(crate) struct Request {
     fix: bool,
     slapslop_baseline: Option<String>,
     branch: Option<String>,
+    #[serde(default)]
+    args: BTreeMap<String, ArgsOverride>,
     #[serde(skip)]
     baseline_only: bool,
 }
@@ -106,6 +108,7 @@ struct JobResult {
     exit: Option<i32>,
     new: Vec<Diag>,
     output: Option<String>,
+    custom_args: bool,
 }
 
 #[derive(Deserialize)]
@@ -238,6 +241,9 @@ async fn check(
             Ok((name, profile.with_context(|| format!("no profile {name} for {}", repo.name()))?))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(key) = req.args.keys().find(|key| !repo.cfg().jobs.iter().any(|job| job.answers_to(key))) {
+        bail!("no job of {} answers to {key}", repo.name());
+    }
     let current = repo.current().with_context(|| format!("{} has no generation yet", repo.name()))?;
     let (generation, rebased_from) = match repo.find(&req.base.sha) {
         Some(generation) => (generation, None),
@@ -296,17 +302,26 @@ async fn check(
     let all_jobs = &repo.cfg().jobs;
     let mut jobs = Vec::with_capacity(all_jobs.len());
     for job in all_jobs {
-        let cmd = match &job.on_patch {
+        let template = match &job.on_patch {
             Some(scoped) if !scope.whole => match scope.command(scoped) {
                 Some(cmd) => cmd,
                 None => continue,
             },
             _ => job.cmd.clone(),
         };
-        let (out, found) = sandbox.diagnose_cmd(job, &cmd).await?;
+        let custom = req
+            .args
+            .get(&job.name)
+            .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key)).map(|(_, over)| over));
+        let (out, mut found) = sandbox.diagnose(job, &job.render(&template, custom)).await?;
         let output = (!out.ok() && found.is_empty()).then(|| out.tail());
-        let new = diag::new_only(found, generation.baseline(&job.name));
-        jobs.push(JobResult { name: job.name.clone(), exit: out.code, new, output });
+        let new = if custom.is_some() {
+            found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
+            found
+        } else {
+            diag::new_only(found, generation.baseline(&job.name))
+        };
+        jobs.push(JobResult { name: job.name.clone(), exit: out.code, new, output, custom_args: custom.is_some() });
         clock.mark(format!("job:{}", job.name));
     }
 

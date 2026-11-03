@@ -5,9 +5,9 @@ state_dir = "state"
 url = "https://github.com/tempoxyz/tempo"
 clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
 jobs = [
-  { name = "clippy-runtime", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --bins --all-features --locked --message-format=json" },
-  { name = "clippy-tests", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --tests --all-features --locked --message-format=json" },
-  { name = "clippy-benches", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --benches --examples --all-features --locked --message-format=json" },
+  { name = "clippy-runtime", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --bins --all-features --locked --message-format=json --" },
+  { name = "clippy-tests", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --tests --all-features --locked --message-format=json --" },
+  { name = "clippy-benches", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --benches --examples --all-features --locked --message-format=json --" },
   { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
@@ -15,8 +15,8 @@ jobs = [
 url = "https://github.com/paradigmxyz/reth"
 clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
 jobs = [
-  { name = "clippy-all-features", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --all-features --locked --message-format=json" },
-  { name = "clippy", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --locked --message-format=json" },
+  { name = "clippy-all-features", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --all-features --locked --message-format=json --" },
+  { name = "clippy", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --locked --message-format=json --" },
   { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
@@ -26,7 +26,7 @@ clippy = "cargo clippy --locked --message-format=json"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --locked --workspace --lib --bins --tests --message-format=json -- -D warnings", fix = "cargo clippy --locked --workspace --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
-  { name = "slapslop", cmd = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run .", slapslop = true },
+  { name = "slapslop", cmd = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run .", on_patch = "cargo build --release --locked -p cargo-slapslop -p slapslop-driver && target/release/cargo-slapslop run . --diff HEAD~1", slapslop = true },
   { name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {packages}" },
 ]
 
@@ -34,9 +34,9 @@ jobs = [
 url = "https://github.com/joshieDo/warmd"
 clippy = "cargo clippy --locked --message-format=json"
 jobs = [
-  { name = "clippy", cmd = "cargo clippy --all-targets --all-features --locked --message-format=json", fix = "cargo clippy --all-targets --all-features --locked --fix --allow-dirty --allow-no-vcs" },
+  { name = "clippy", cmd = "cargo clippy --all-targets --all-features --locked --message-format=json --", fix = "cargo clippy --all-targets --all-features --locked --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", cmd = "cargo clippy --bins --all-features --locked --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
-  { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --all-lints', slapslop = true },
+  { name = "slapslop", cmd = 'cargo-slapslop run "$PWD"', on_patch = 'cargo-slapslop run "$PWD" --diff HEAD~1', args = "--all-lints", slapslop = true },
   { name = "fmt", cmd = "cargo fmt --check", on_patch = "cargo fmt --check {packages}" },
 ]
 
@@ -44,7 +44,7 @@ jobs = [
 url = "https://github.com/alloy-rs/evm2"
 clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --message-format=json"
 jobs = [
-  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --workspace --all-targets --all-features --message-format=json" },
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --workspace --all-targets --all-features --message-format=json --" },
   { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
@@ -52,7 +52,7 @@ jobs = [
 url = "https://github.com/paradigmxyz/solar"
 clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --message-format=json"
 jobs = [
-  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --workspace --all-targets --message-format=json" },
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --workspace --all-targets --message-format=json --" },
   { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]
 
@@ -60,6 +60,6 @@ jobs = [
 url = "https://github.com/alloy-rs/alloy"
 clippy = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --message-format=json"
 jobs = [
-  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --workspace --all-targets --all-features --message-format=json" },
+  { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --workspace --all-targets --all-features --message-format=json --" },
   { name = "fmt", cmd = "cargo +nightly fmt --all --check", on_patch = "cargo +nightly fmt --check {packages}" },
 ]

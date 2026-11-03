@@ -214,7 +214,7 @@ impl Repo {
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build(&tmp) };
         let mut baseline = Baseline::new();
         for job in self.cfg.jobs.clone() {
-            let (out, found) = sandbox.diagnose(&job).await?;
+            let (out, found) = sandbox.diagnose(&job, &job.render(&job.cmd, None)).await?;
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
             clock.mark(format!("job:{}", job.name));
             baseline.insert(job.name, found);

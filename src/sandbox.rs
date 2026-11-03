@@ -80,11 +80,7 @@ impl Sandbox<'_> {
         })
     }
 
-    pub(crate) async fn diagnose(self, job: &Job) -> anyhow::Result<(Output, Vec<Diag>)> {
-        self.diagnose_cmd(job, &job.cmd).await
-    }
-
-    pub(crate) async fn diagnose_cmd(self, job: &Job, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
+    pub(crate) async fn diagnose(self, job: &Job, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
         if !job.slapslop {
             let out = self.run(cmd, None).await?;
             let found = diag::parse(&out.stdout);

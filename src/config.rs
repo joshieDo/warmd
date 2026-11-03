@@ -41,7 +41,34 @@ pub(crate) struct Job {
     pub(crate) fix: Option<String>,
     pub(crate) on_patch: Option<String>,
     #[serde(default)]
+    pub(crate) args: String,
+    #[serde(default)]
     pub(crate) slapslop: bool,
+}
+
+impl Job {
+    pub(crate) fn render(&self, template: &str, args: Option<&ArgsOverride>) -> String {
+        let args = args.map_or_else(
+            || self.args.clone(),
+            |over| {
+                let base = over.replace.as_ref().map_or_else(|| self.args.clone(), |replace| quote_all(replace));
+                format!("{base} {}", quote_all(&over.add)).trim().to_owned()
+            },
+        );
+        if template.contains("{args}") { template.replace("{args}", &args) } else { format!("{template} {args}") }
+    }
+
+    pub(crate) fn answers_to(&self, key: &str) -> bool {
+        self.name == key || self.name.strip_prefix(key).is_some_and(|rest| rest.starts_with('-'))
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArgsOverride {
+    #[serde(default)]
+    add: Vec<String>,
+    replace: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,7 +115,7 @@ const fn default_poll_secs() -> u64 {
 }
 
 const fn default_keep_hours() -> u64 {
-    12
+    0
 }
 
 const fn default_jobs_per_repo() -> u16 {
@@ -101,4 +128,8 @@ fn default_branch() -> String {
 
 fn default_clippy() -> String {
     "cargo clippy --message-format=json".to_owned()
+}
+
+fn quote_all(args: &[String]) -> String {
+    args.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ")
 }
