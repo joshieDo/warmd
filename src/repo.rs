@@ -257,7 +257,7 @@ impl Repo {
         if self.current().is_none_or(|current| current.sha != head) {
             self.set_status(State::Refreshing, &head, None, Vec::new());
             let mut clock = Clock::start();
-            let built = self.build(&head, &mut clock).await;
+            let built = metrics::with_commands(self.build(&head, &mut clock)).await;
             let fields = json!({ "repo": self.name, "sha": head, "ok": built.is_ok() });
             metrics::record(&self.metrics_file, "build", fields, &clock).await;
             let phases = clock.into_phases();

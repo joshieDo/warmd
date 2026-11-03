@@ -1,4 +1,4 @@
-use std::{path::Path, time::Instant};
+use std::{cell::RefCell, path::Path, time::Instant};
 
 use serde::Serialize;
 use serde_json::{Value, from_str, json, to_string};
@@ -6,6 +6,7 @@ use tokio::{
     fs::{OpenOptions, read_to_string, rename, write},
     io::AsyncWriteExt as _,
     sync::Mutex,
+    task_local,
 };
 
 use crate::stats::now_secs;
@@ -14,10 +15,18 @@ pub(crate) const RETAIN_SECS: u64 = 4 * 24 * 3600;
 
 static WRITE: Mutex<()> = Mutex::const_new(());
 
+const COMMAND_CHARS: usize = 600;
+
+task_local! {
+    static COMMANDS: RefCell<Vec<String>>;
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Phase {
     name: String,
+    start_secs: f64,
     secs: f64,
+    commands: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -35,7 +44,13 @@ impl Clock {
 
     pub(crate) fn mark(&mut self, name: impl Into<String>) {
         let now = Instant::now();
-        self.phases.push(Phase { name: name.into(), secs: now.duration_since(self.last).as_secs_f64() });
+        let commands = COMMANDS.try_with(RefCell::take).unwrap_or_default();
+        self.phases.push(Phase {
+            name: name.into(),
+            start_secs: self.total_secs(),
+            secs: now.duration_since(self.last).as_secs_f64(),
+            commands,
+        });
         self.last = now;
     }
 
@@ -81,4 +96,15 @@ async fn prune(file: &Path, now: u64) -> anyhow::Result<()> {
     write(&tmp, kept).await?;
     rename(&tmp, file).await?;
     Ok(())
+}
+
+pub(crate) async fn with_commands<F: Future>(future: F) -> F::Output {
+    COMMANDS.scope(RefCell::new(Vec::new()), future).await
+}
+
+pub(crate) fn note_command(cmd: &str) {
+    let short = cmd.chars().take(COMMAND_CHARS).collect::<String>();
+    if COMMANDS.try_with(|commands| commands.borrow_mut().push(short)).is_err() {
+        eprintln!("warmd: command outside a timed job: {}", cmd.lines().next().unwrap_or_default());
+    }
 }

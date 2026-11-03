@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     check::{Outcome, Request},
     config::{Config, Profile},
-    metrics::{Clock, Phase, RETAIN_SECS},
+    metrics::{Clock, Phase, RETAIN_SECS, with_commands},
     repo::{Repo, View},
     stats::{Machine, now_secs},
 };
@@ -221,7 +221,7 @@ fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
                 entry.running_since = Some(now_secs());
             }
         };
-        let (outcome, phases) = check::run(&repo, &app.full, req, &layer, running).await;
+        let (outcome, phases) = with_commands(check::run(&repo, &app.full, req, &layer, running)).await;
         app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
         app.finish(id, outcome.map(Done::Check), phases);
     });

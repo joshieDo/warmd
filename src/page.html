@@ -52,6 +52,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .node { font-weight: 500; }
 .parts { margin: 4px 0 0; font-size: 12px; }
 .detail section { margin-bottom: 18px; } .kv { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
+.timeline { position: relative; margin: 8px 0 22px; } .lane { position: relative; height: 22px; margin: 4px 0; background: var(--fill); border-radius: 4px; } .seg { position: absolute; top: 0; bottom: 0; border-radius: 3px; } .lane-label { position: absolute; right: 6px; top: 3px; font-size: 11px; color: var(--muted); mix-blend-mode: difference; } .ticks { position: relative; height: 14px; font-size: 11px; color: var(--muted); } .ticks span { position: absolute; transform: translateX(-50%); } .ticks span:first-child { transform: none; } .ticks span:last-child { transform: translateX(-100%); } .legend { display: flex; gap: 14px; margin-bottom: 14px; font-size: 12px; color: var(--muted); } .leg i, .dotc { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; } .step { padding: 6px 0; border-bottom: 1px solid var(--line); } .cmd { margin: 4px 0 0 15px; padding: 6px 8px; background: var(--fill); border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 120px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -88,9 +89,28 @@ const chips = list => (list || []).map(x => '<span class="chip">' + esc(x) + '</
 const argsHtml = args => Object.entries(args || {}).map(([job, o]) => '<div><b>' + esc(job) + '</b> ' + (o.replace ? 'replace ' + chips(o.replace) : '') + (o.add && o.add.length ? ' add ' + chips(o.add) : '') + '</div>').join("");
 const yes = b => b ? "yes" : "";
 const time = t => t ? new Date(t * 1000).toLocaleTimeString() : "";
-function detailHtml(head, f, req, phases) {
-  const total = (phases || []).reduce((a, p) => a + p.secs, 0) || 1;
-  const bars = (phases || []).filter(p => p.secs >= 0.05).map(p => '<div class="phase"><span>' + esc(p.name) + '</span><div class="bar"><div style="width:' + (p.secs * 100 / total).toFixed(1) + '%"></div></div><span class="muted">' + dur(p.secs) + '</span></div>').join("");
+const phaseColor = name => /^job:clippy|^clippy/.test(name) ? "#4f8cff" : /slapslop/.test(name) ? "#a970ff" : /fmt/.test(name) ? "#2fbf71" : name === "full" ? "#ff9f43" : /copy|fetch|clone|checkout|submodules/.test(name) ? "#20c4c4" : "#7d7d7d";
+function timelineHtml(jobs) {
+  const t0 = Math.min(...jobs.map(j => j.start)), t1 = Math.max(...jobs.map(j => j.start + j.total));
+  const span = Math.max(t1 - t0, 0.001);
+  const lanes = [];
+  for (const j of [...jobs].sort((a, b) => a.start - b.start)) {
+    let lane = lanes.find(l => l.end <= j.start + 0.01);
+    if (!lane) { lane = { end: 0, jobs: [] }; lanes.push(lane); }
+    lane.jobs.push(j); lane.end = j.start + j.total;
+  }
+  const rows = lanes.map(l => '<div class="lane">' + l.jobs.map(j => j.phases.map(p => {
+    const left = (j.start + p.start_secs - t0) * 100 / span, width = Math.max(p.secs * 100 / span, 0.3);
+    return '<div class="seg" title="' + esc(j.label + ' / ' + p.name + ' ' + dur(p.secs)) + '" style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%;background:' + phaseColor(p.name) + '"></div>';
+  }).join("")).join("") + '<span class="lane-label">' + esc(l.jobs.map(j => j.label).join(", ")) + '</span></div>').join("");
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => '<span style="left:' + (f * 100) + '%">' + dur(span * f) + '</span>').join("");
+  const legend = [["clippy", "job:clippy"], ["slapslop", "job:slapslop"], ["fmt", "job:fmt"], ["full", "full"], ["git/copy", "copy"], ["other", "setup"]].map(([l, n]) => '<span class="leg"><i style="background:' + phaseColor(n) + '"></i>' + l + '</span>').join("");
+  const steps = jobs.flatMap(j => j.phases.filter(p => p.secs >= 0.05 || p.commands.length).map(p =>
+    '<div class="step"><div><i class="dotc" style="background:' + phaseColor(p.name) + '"></i><b>' + esc(p.name) + '</b> <span class="muted">' + esc(jobs.length > 1 ? j.label + " · " : "") + dur(p.secs) + '</span></div>' +
+    (p.commands || []).map(c => '<pre class="cmd"><code>' + esc(c) + '</code></pre>').join("") + '</div>')).join("");
+  return '<div class="timeline">' + rows + '<div class="ticks">' + ticks + '</div></div><div class="legend">' + legend + '</div><div class="steps">' + steps + '</div>';
+}
+function detailHtml(head, f, req, timeline) {
   return '<div class="detail">' +
     '<section><h2>Job</h2>' + head + '</section>' +
     '<section><h2>Request</h2>' +
@@ -99,7 +119,7 @@ function detailHtml(head, f, req, phases) {
       kv("Patch", req.patch_lines != null ? req.patch_files + " files, " + req.patch_lines + " lines" : "") +
       (Object.keys(req).length ? "" : '<div class="muted">Not recorded for jobs before this change.</div>') +
     '</section>' +
-    (bars ? '<section><h2>Phases</h2>' + bars + '</section>' : '') +
+    (timeline ? '<section><h2>Timeline</h2>' + timeline + '</section>' : '') +
   '</div>';
 }
 function liveDetail(i) {
@@ -109,7 +129,7 @@ function liveDetail(i) {
   $("modal-title").textContent = [j.repo, j.kind, j.branch].filter(Boolean).join(" / ");
   const head = kv("Repo", esc(j.repo)) + kv("Commit", commitLink(j.repo, j.base, true)) + kv("Branch", esc(j.branch || "")) + kv("Kind", esc(j.kind)) +
     kv("Queued at", time(j.started)) + kv("Running", j.running_since ? "since " + time(j.running_since) + " (" + dur(Date.now() / 1000 - j.running_since) + ")" : "queued");
-  $("modal-body").innerHTML = detailHtml(head, {}, j.request || {}, []);
+  $("modal-body").innerHTML = detailHtml(head, {}, j.request || {}, "");
   $("modal").hidden = false;
 }
 function recentDetail(i) {
@@ -122,7 +142,12 @@ function recentDetail(i) {
   const head = kv("Repo", esc(f.repo)) + kv("Commit", commitLink(f.repo, f.base || f.sha, f.dirty)) + kv("Ran on", f.ran_on && f.ran_on !== f.base ? commitLink(f.repo, f.ran_on, false) : "") +
     kv("Branch", esc(f.branch || "")) + kv("Kind", esc(j.kind)) + kv("Result", esc(res)) + kv("Finished", new Date(j.at * 1000).toLocaleString()) +
     kv("Total", dur(j.total_secs)) + kv("Layer", f.layer_bytes != null ? size(f.layer_bytes) : "");
-  $("modal-body").innerHTML = detailHtml(head, f, f.request || {}, j.phases);
+  const span = r => ({ start: r.at - r.total_secs, end: r.at });
+  const me = span(j);
+  const related = last.recent.filter(r => r === j || (r.fields.repo === f.repo && r.fields.base === f.base && (r.fields.branch || null) === (f.branch || null) && span(r).start < me.end && span(r).end > me.start));
+  const jobs = related.map(r => ({ label: r.kind, start: r.at - r.total_secs, total: r.total_secs, phases: (r.phases || []).map(p => ({ start_secs: 0, commands: [], ...p })) }));
+  for (const job of jobs) if (job.phases.every(p => !p.start_secs)) { let t = 0; for (const p of job.phases) { p.start_secs = t; t += p.secs; } }
+  $("modal-body").innerHTML = detailHtml(head, f, f.request || {}, jobs.some(x => x.phases.length) ? timelineHtml(jobs) : "");
   $("modal").hidden = false;
 }
 function tree(i) {

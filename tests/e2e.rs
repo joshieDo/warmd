@@ -282,6 +282,13 @@ fn checks_patches_against_warm_generations() {
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
     assert!(first["fields"]["request"]["patch_lines"].as_u64() > Some(0), "{first:#}");
+    let clippy = checks
+        .iter()
+        .flat_map(|check| check["phases"].as_array().unwrap())
+        .find(|phase| phase["name"] == "job:clippy")
+        .unwrap();
+    assert!(clippy["commands"][0].as_str().unwrap().contains("cargo clippy"), "{clippy:#}");
+    assert!(clippy["start_secs"].as_f64() > Some(0.0), "{clippy:#}");
     assert_eq!(first["fields"]["ran_on"], json!(base));
     assert_eq!((first["fields"]["base"].clone(), first["fields"]["dirty"].clone()), (json!(base), json!(true)));
     until(|| {
