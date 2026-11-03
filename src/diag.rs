@@ -143,11 +143,10 @@ fn rustfmt_diffs(stdout: &str) -> Vec<Diag> {
 fn slapslop_suffix(message: &str) -> Option<(&str, bool)> {
     let inner = message.strip_suffix(']')?.rsplit_once('[')?.1;
     let (lint, rest) = inner.split_once(';').unwrap_or((inner, ""));
-    let named = !lint.is_empty() && lint.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
-    named.then(|| (lint, rest.trim_start().starts_with("hazy")))
+    (!lint.is_empty() && lint.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'))
+        .then(|| (lint, rest.trim_start().starts_with("hazy")))
 }
 
 fn hunk_start(hunk: &str) -> Option<u32> {
-    let new = hunk.split(' ').find_map(|part| part.strip_prefix('+'))?;
-    new.split(',').next()?.parse().ok()
+    (hunk.split(' ').find_map(|part| part.strip_prefix('+'))?).split(',').next()?.parse().ok()
 }

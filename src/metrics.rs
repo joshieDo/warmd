@@ -57,20 +57,22 @@ pub(crate) async fn record(file: &Path, kind: &str, fields: Value, clock: &Clock
     let line =
         json!({ "at": at, "kind": kind, "fields": fields, "total_secs": clock.total_secs(), "phases": clock.phases() });
     let _write = WRITE.lock().await;
-    let written = async {
+    if let Err(err) = async {
         let mut out = OpenOptions::new().create(true).append(true).open(file).await?;
         out.write_all(format!("{}\n", to_string(&line)?).as_bytes()).await?;
         prune(file, at).await
-    };
-    if let Err(err) = written.await {
+    }
+    .await
+    {
         eprintln!("warmd: writing {}: {err:#}", file.display());
     }
 }
 
 async fn prune(file: &Path, now: u64) -> anyhow::Result<()> {
     let text = read_to_string(file).await?;
-    let at = |line: &str| from_str::<Value>(line).ok().and_then(|record| record["at"].as_u64()).unwrap_or_default();
-    let fresh = |line: &str| at(line) + RETAIN_SECS >= now;
+    let fresh = |line: &str| {
+        from_str::<Value>(line).ok().and_then(|record| record["at"].as_u64()).unwrap_or_default() + RETAIN_SECS >= now
+    };
     if text.lines().next().is_none_or(fresh) {
         return Ok(());
     }

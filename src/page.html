@@ -107,9 +107,28 @@ function tree(i) {
   $("modal").hidden = false;
 }
 function closeTree() { open = null; $("modal").hidden = true; }
+function liveDetail(i) {
+  const j = last.live[i];
+  if (!j) return;
+  open = null;
+  $("modal-title").textContent = [j.repo, j.kind, j.branch].filter(Boolean).join(" / ");
+  $("modal-body").innerHTML = '<pre style="white-space:pre-wrap"><code>' + esc(JSON.stringify({ base: j.base, started: new Date(j.started * 1000).toLocaleTimeString(), running_since: j.running_since && new Date(j.running_since * 1000).toLocaleTimeString(), ...j.request }, null, 2)) + '</code></pre>';
+  $("modal").hidden = false;
+}
+function recentDetail(i) {
+  const j = last.recent[i];
+  if (!j) return;
+  open = null;
+  $("modal-title").textContent = [j.fields.repo, j.kind, j.fields.branch].filter(Boolean).join(" / ");
+  $("modal-body").innerHTML = '<pre style="white-space:pre-wrap"><code>' + esc(JSON.stringify({ at: new Date(j.at * 1000).toLocaleString(), total_secs: j.total_secs, ...j.fields, phases: j.phases }, null, 2)) + '</code></pre>';
+  $("modal").hidden = false;
+}
 document.addEventListener("click", e => {
   const row = e.target.closest("tr.click");
-  if (row) tree(Number(row.dataset.repo));
+  if (e.target.closest("a")) return;
+  if (row && row.dataset.live != null) liveDetail(Number(row.dataset.live));
+  else if (row && row.dataset.recent != null) recentDetail(Number(row.dataset.recent));
+  else if (row) tree(Number(row.dataset.repo));
   else if (e.target.id === "modal" || e.target.id === "modal-close") closeTree();
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeTree(); });
@@ -138,16 +157,16 @@ async function load() {
     return sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
   };
   const liveRows = (s.building || []).map(b => '<tr><td class="muted">' + dur(Date.now() / 1000 - b.started) + '</td><td>' + esc(b.repo) + '</td><td>' + commitLink(b.repo, b.sha, false) + '</td><td>build</td><td class="muted">main</td><td>' + dot("refreshing") + 'building</td></tr>')
-    .concat((s.live || []).map(j => '<tr><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + commitLink(j.repo, j.base, true) + '</td><td>' + esc(j.kind) + '</td><td>' + esc(j.branch || "–") + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
+    .concat((s.live || []).map((j, i) => '<tr class="click" data-live="' + i + '"><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + commitLink(j.repo, j.base, true) + '</td><td>' + esc(j.kind) + '</td><td>' + esc(j.branch || "–") + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
   $("live").innerHTML = liveRows.join("") || '<tr><td colspan="6" class="muted">Nothing running</td></tr>';
-  $("jobs").innerHTML = s.recent.map(j => {
+  $("jobs").innerHTML = s.recent.map((j, i) => {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
     const res = String(j.fields.result ?? (j.kind === "build" ? (j.fields.ok ? "built" : "failed") : j.fields.ok ? "ok" : "failed"));
     const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" || res === "built" ? "ok" : "refreshing";
     const repo = last.repos.find(r => r.name === j.fields.repo), sha = String(j.fields.base ?? j.fields.sha ?? "");
     const label = sha ? '<code>' + esc(sha.slice(0, 7)) + (j.fields.dirty ? '-dirty' : '') + '</code>' : '<span class="muted">–</span>';
     const commit = sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
-    return '<tr><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + commit + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
+    return '<tr class="click" data-recent="' + i + '"><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + commit + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
   }).join("") || '<tr><td colspan="7" class="muted">No jobs yet</td></tr>';
   $("updated").textContent = "updated " + new Date().toLocaleTimeString();
 }

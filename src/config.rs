@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context as _;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use toml::from_str;
 
 pub(crate) const FULL_CLIPPY: &str = include_str!("full-clippy.toml");
@@ -75,7 +75,7 @@ impl Job {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArgsOverride {
     #[serde(default)]
@@ -110,8 +110,8 @@ pub(crate) enum Step {
 }
 
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    from_str(&(fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?))
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 const fn default_poll_secs() -> u64 {

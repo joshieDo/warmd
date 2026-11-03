@@ -31,13 +31,12 @@ impl Machine {
             ticks.tick().await;
             match (cpu_times().await, memory().await) {
                 (Ok(times), Ok((total, used))) => {
-                    if let Some(before) = &last {
-                        let usage =
-                            times.iter().zip(before).map(|(now, then)| now.percent_since(*then)).collect::<Vec<_>>();
-                        if let Some((all, cores)) = usage.split_first() {
-                            self.push(Sample { at: now_secs(), cpu: *all, mem: percent(used, total) });
-                            cores.clone_into(&mut self.per_core.lock().unwrap_or_else(PoisonError::into_inner));
-                        }
+                    let usage = last.as_ref().map(|before| {
+                        times.iter().zip(before).map(|(now, then)| now.percent_since(*then)).collect::<Vec<_>>()
+                    });
+                    if let Some((all, cores)) = usage.as_deref().and_then(<[f64]>::split_first) {
+                        self.push(Sample { at: now_secs(), cpu: *all, mem: percent(used, total) });
+                        cores.clone_into(&mut self.per_core.lock().unwrap_or_else(PoisonError::into_inner));
                     }
                     last = Some(times);
                 }
@@ -139,12 +138,18 @@ impl CpuTimes {
     fn parse(line: &str) -> anyhow::Result<Self> {
         let fields = line.split_whitespace().skip(1).take(8).map(str::parse::<u64>).collect::<Result<Vec<_>, _>>()?;
         let total = fields.iter().sum::<u64>();
-        let idle = fields
-            .get(3)
-            .zip(fields.get(4))
-            .map(|(idle, iowait)| idle + iowait)
-            .ok_or_else(|| missing("no idle time"))?;
-        Ok(Self { busy: total.checked_sub(idle).ok_or_else(|| missing("idle exceeds total"))?, total })
+        Ok(Self {
+            busy: total
+                .checked_sub(
+                    fields
+                        .get(3)
+                        .zip(fields.get(4))
+                        .map(|(idle, iowait)| idle + iowait)
+                        .ok_or_else(|| missing("no idle time"))?,
+                )
+                .ok_or_else(|| missing("idle exceeds total"))?,
+            total,
+        })
     }
 
     fn percent_since(self, before: Self) -> f64 {
@@ -157,17 +162,15 @@ pub(crate) fn now_secs() -> u64 {
 }
 
 fn peak_of(chunk: &[Sample]) -> Option<Sample> {
-    let last = chunk.last()?;
     Some(Sample {
-        at: last.at,
+        at: chunk.last()?.at,
         cpu: chunk.iter().map(|sample| sample.cpu).fold(0.0, f64::max),
         mem: chunk.iter().map(|sample| sample.mem).fold(0.0, f64::max),
     })
 }
 
 async fn cpu_times() -> anyhow::Result<Vec<CpuTimes>> {
-    let text = read_to_string("/proc/stat").await?;
-    text.lines().filter(|line| line.starts_with("cpu")).map(CpuTimes::parse).collect()
+    read_to_string("/proc/stat").await?.lines().filter(|line| line.starts_with("cpu")).map(CpuTimes::parse).collect()
 }
 
 async fn cpu_model() -> anyhow::Result<String> {
@@ -179,18 +182,23 @@ async fn cpu_model() -> anyhow::Result<String> {
 async fn memory() -> anyhow::Result<(u64, u64)> {
     let text = read_to_string("/proc/meminfo").await?;
     let total = meminfo_field(&text, "MemTotal:")?;
-    let available = meminfo_field(&text, "MemAvailable:")?;
-    Ok((total, total.checked_sub(available).ok_or_else(|| missing("available exceeds total"))?))
+    Ok((
+        total,
+        total.checked_sub(meminfo_field(&text, "MemAvailable:")?).ok_or_else(|| missing("available exceeds total"))?,
+    ))
 }
 
 fn meminfo_field(text: &str, name: &str) -> anyhow::Result<u64> {
-    let rest = text.lines().find_map(|line| line.strip_prefix(name)).ok_or_else(|| missing(name))?;
-    Ok(rest.split_whitespace().next().ok_or_else(|| missing(name))?.parse::<u64>()? * 1024)
+    Ok((text.lines().find_map(|line| line.strip_prefix(name)).ok_or_else(|| missing(name))?)
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| missing(name))?
+        .parse::<u64>()?
+        * 1024)
 }
 
 async fn load_average() -> anyhow::Result<Vec<f64>> {
-    let text = read_to_string("/proc/loadavg").await?;
-    Ok(text.split_whitespace().take(3).map(str::parse).collect::<Result<_, _>>()?)
+    Ok(read_to_string("/proc/loadavg").await?.split_whitespace().take(3).map(str::parse).collect::<Result<_, _>>()?)
 }
 
 async fn disks(state_dir: &Path) -> anyhow::Result<Vec<Disk>> {

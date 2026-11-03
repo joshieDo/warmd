@@ -77,6 +77,7 @@ struct Live {
     base: String,
     started: u64,
     running_since: Option<u64>,
+    request: Value,
 }
 
 #[derive(Debug)]
@@ -182,8 +183,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/{name}", get(repo_view))
         .route("/repos/{name}/refresh", post(refresh))
         .with_state(app);
-    let listener = TcpListener::bind(&config.listen).await.with_context(|| format!("binding {}", config.listen))?;
-    serve(listener, router).await?;
+    serve(TcpListener::bind(&config.listen).await.with_context(|| format!("binding {}", config.listen))?, router)
+        .await?;
     Ok(())
 }
 
@@ -208,6 +209,7 @@ fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
         base: req.base_sha().to_owned(),
         started: now_secs(),
         running_since: None,
+        request: req.summary(),
     };
     app.live.lock().unwrap_or_else(PoisonError::into_inner).insert(id, live);
     let (app, repo) = (Arc::clone(app), Arc::clone(repo));
@@ -244,8 +246,12 @@ async fn refresh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply
 }
 
 async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Job> {
-    let jobs = app.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-    jobs.get(&id).map(|(_, job)| Json(job.clone())).ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))
+    app.jobs
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&id)
+        .map(|(_, job)| Json(job.clone()))
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))
 }
 
 async fn repo_view(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<View> {

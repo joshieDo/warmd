@@ -78,6 +78,21 @@ impl Request {
         }
     }
 
+    pub(crate) fn summary(&self) -> Value {
+        json!({
+            "session": self.session,
+            "full": self.full,
+            "full_only": self.full_only,
+            "only": self.only,
+            "skip": self.skip,
+            "args": self.args,
+            "fix": self.fix,
+            "patch_lines": self.patch.lines().count(),
+            "patch_files": changed_files(&self.patch).len(),
+            "slapslop_baseline": self.slapslop_baseline.is_some(),
+        })
+    }
+
     pub(crate) fn branch(&self) -> Option<&str> {
         self.branch.as_deref()
     }
@@ -199,16 +214,21 @@ struct Scope {
 impl Scope {
     fn of(metadata: &str, root: &str, files: &BTreeSet<String>) -> anyhow::Result<Self> {
         let metadata: Metadata = from_str(metadata).context("reading cargo metadata")?;
-        let dirs = metadata
-            .packages
-            .iter()
-            .filter_map(|package| {
-                let manifest = package.manifest_path.strip_prefix(root)?.strip_prefix('/')?;
-                Some((manifest.strip_suffix("Cargo.toml")?, package.name.as_str()))
-            })
-            .collect::<Vec<_>>();
         let owner = |file: &str| {
-            dirs.iter().filter(|(dir, _)| file.starts_with(dir)).max_by_key(|(dir, _)| dir.len()).map(|(_, name)| *name)
+            (metadata
+                .packages
+                .iter()
+                .filter_map(|package| {
+                    Some((
+                        package.manifest_path.strip_prefix(root)?.strip_prefix('/')?.strip_suffix("Cargo.toml")?,
+                        package.name.as_str(),
+                    ))
+                })
+                .collect::<Vec<_>>())
+            .iter()
+            .filter(|(dir, _)| file.starts_with(dir))
+            .max_by_key(|(dir, _)| dir.len())
+            .map(|(_, name)| *name)
         };
         let mut scope = Self::default();
         for file in files {
@@ -257,6 +277,7 @@ pub(crate) async fn run(
     let mut clock = Clock::start();
     let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
+    let request = req.summary();
     let (layer, session_guard) = match req.session.clone().filter(|_| !req.full_only) {
         Some(name) => {
             let (dir, guard) = repo.session(&name).await;
@@ -266,9 +287,7 @@ pub(crate) async fn run(
     };
     let outcome = check(repo, full, req, &layer, running, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
-    let keep =
-        session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none());
-    if keep {
+    if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none()) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
         let meta = json!({ "gen": built_on, "used_at": now_secs() }).to_string();
         if let Err(err) = write(layer.join("meta.json"), meta).await {
@@ -293,6 +312,7 @@ pub(crate) async fn run(
         "branch": branch,
         "ran_on": ran_on,
         "layer_bytes": layer_bytes,
+        "request": request,
     });
     metrics::record(&repo.metrics_file(), kind, fields, &clock).await;
     (outcome, clock.into_phases())
@@ -326,8 +346,9 @@ async fn check(
     let _slot = repo.slot().await?;
     running();
     clock.mark("queued");
-    let meta = read_to_string(layer.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
-    let session_reused = rebased_from.is_none() && meta.is_some_and(|meta| meta["gen"] == generation.sha());
+    let session_reused = rebased_from.is_none()
+        && (read_to_string(layer.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok()))
+            .is_some_and(|meta| meta["gen"] == generation.sha());
     if !session_reused {
         repo::remove_tree(layer).await?;
     }
@@ -339,31 +360,41 @@ async fn check(
         Sandbox { repo: repo.name(), tree: Tree::Overlay { lower: generation.dir(), upper: &upper, work: &work } };
 
     if rebased_from.is_some() {
-        let applied = if req.patch.trim().is_empty() {
+        if if req.patch.trim().is_empty() {
             None
         } else {
             Some(sandbox.run("git apply --3way -", Some(&req.patch)).await?)
-        };
-        if applied.is_some_and(|applied| !applied.ok()) {
-            let conflicted = sandbox.run("git diff --name-only --diff-filter=U", None).await?;
-            return Ok(Outcome::RebaseNeeded { files: conflicted.stdout.lines().map(str::to_owned).collect() });
         }
-        let commit = format!("git add -A && {COMMIT} -m patch");
-        let committed = sandbox.run(&commit, None).await?;
+        .is_some_and(|applied| !applied.ok())
+        {
+            return Ok(Outcome::RebaseNeeded {
+                files: sandbox
+                    .run("git diff --name-only --diff-filter=U", None)
+                    .await?
+                    .stdout
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+            });
+        }
+        let committed = sandbox.run(&format!("git add -A && {COMMIT} -m patch"), None).await?;
         ensure!(committed.ok(), "committing the patch: {}", committed.stderr.trim());
     } else {
-        let script = SYNC_TREE
-            .replace("{gen}", generation.sha())
-            .replace("{apply}", if req.patch.trim().is_empty() { "false" } else { "true" });
-        let synced = sandbox.run(&script, Some(&req.patch)).await?;
+        let synced = sandbox
+            .run(
+                &(SYNC_TREE
+                    .replace("{gen}", generation.sha())
+                    .replace("{apply}", if req.patch.trim().is_empty() { "false" } else { "true" })),
+                Some(&req.patch),
+            )
+            .await?;
         ensure!(synced.ok(), "the patch does not apply to {}: {}", generation.sha(), synced.stderr.trim());
     }
     clock.mark("apply");
     if let Some(baseline) = &req.slapslop_baseline {
         let written = sandbox.run(&format!("mkdir -p .slapslop && cat > {SLAPSLOP_BASELINE}"), Some(baseline)).await?;
         ensure!(written.ok(), "writing the slapslop baseline: {}", written.stderr.trim());
-        let commit = format!("git add -A && {COMMIT} --amend --no-edit");
-        let committed = sandbox.run(&commit, None).await?;
+        let committed = sandbox.run(&format!("git add -A && {COMMIT} --amend --no-edit"), None).await?;
         ensure!(committed.ok(), "committing the baseline: {}", committed.stderr.trim());
     }
     clock.mark("commit");
@@ -377,8 +408,11 @@ async fn check(
 
     let added = diag::added_lines(&req.patch);
     let scope = if req.full || cfg.jobs.iter().any(|job| job.on_patch.is_some()) {
-        let metadata = sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?;
-        let scope = Scope::of(&metadata.stdout, &sandbox::work_path(repo.name()), &changed_files(&req.patch))?;
+        let scope = Scope::of(
+            &sandbox.run("cargo metadata --no-deps --format-version 1 --offline", None).await?.stdout,
+            &sandbox::work_path(repo.name()),
+            &changed_files(&req.patch),
+        )?;
         clock.mark("metadata");
         scope
     } else {
@@ -441,9 +475,17 @@ async fn check(
     };
     let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none());
     let ran_on = generation.sha().to_owned();
-    let ok_precise = jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none());
-    let report = Report { ok, ok_precise, session_reused, ran_on, rebased_from, main_moved, jobs, full, fix_patch };
-    Ok(Outcome::Checked(report))
+    Ok(Outcome::Checked(Report {
+        ok,
+        ok_precise: jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none()),
+        session_reused,
+        ran_on,
+        rebased_from,
+        main_moved,
+        jobs,
+        full,
+        fix_patch,
+    }))
 }
 
 async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str) -> anyhow::Result<Vec<Diag>> {
@@ -461,13 +503,15 @@ async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str
             } else {
                 ""
             };
-            let cmd = format!("{conf}{} {targets} {packages} -- {}", repo.cfg().clippy, args.join(" "));
-            let out = sandbox.run(&cmd, None).await?;
-            Ok(diag::parse(&out.stdout))
+            Ok(diag::parse(
+                &sandbox
+                    .run(&format!("{conf}{} {targets} {packages} -- {}", repo.cfg().clippy, args.join(" ")), None)
+                    .await?
+                    .stdout,
+            ))
         }
         Step::Slapslop { args } => {
-            let cmd = format!("cargo-slapslop run \"$PWD\" --diff HEAD~1 {}", args.join(" "));
-            Ok(sandbox.slapslop(&cmd).await?.1)
+            Ok(sandbox.slapslop(&format!("cargo-slapslop run \"$PWD\" --diff HEAD~1 {}", args.join(" "))).await?.1)
         }
     }
 }

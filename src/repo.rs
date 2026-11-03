@@ -283,9 +283,12 @@ impl Repo {
     async fn remote_head(&self) -> anyhow::Result<String> {
         let cfg = self.cfg();
         let refname = format!("refs/heads/{}", cfg.branch);
-        let out = checked(Command::new("git").args(["ls-remote", &cfg.url, &refname])).await?;
-        let sha = out.split_whitespace().next().with_context(|| format!("{} has no {refname}", cfg.url))?;
-        Ok(sha.to_owned())
+        Ok((checked(Command::new("git").args(["ls-remote", &cfg.url, &refname]))
+            .await?
+            .split_whitespace()
+            .next()
+            .with_context(|| format!("{} has no {refname}", cfg.url))?)
+        .to_owned())
     }
 
     async fn build(&self, sha: &str, clock: &mut Clock) -> anyhow::Result<Gen> {
@@ -341,8 +344,9 @@ impl Repo {
             let mut index = 0;
             gens.retain(|generation| {
                 index += 1;
-                let young = generation.born.elapsed().is_ok_and(|age| age < keep);
-                let stays = index == count || young || Arc::strong_count(generation) > 1;
+                let stays = index == count
+                    || (generation.born.elapsed().is_ok_and(|age| age < keep))
+                    || Arc::strong_count(generation) > 1;
                 if !stays {
                     doomed.push(generation.sha.clone());
                 }
@@ -457,8 +461,12 @@ pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
 }
 
 pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
-    let out = checked(Command::new("du").arg("-sb").arg(path)).await?;
-    Ok(out.split_whitespace().next().context("du printed nothing")?.parse()?)
+    Ok(checked(Command::new("du").arg("-sb").arg(path))
+        .await?
+        .split_whitespace()
+        .next()
+        .context("du printed nothing")?
+        .parse()?)
 }
 
 pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
@@ -488,29 +496,29 @@ async fn own_parts(older: &Path, newer: &Path) -> anyhow::Result<Parts> {
 fn bucketize<'a>(files: impl Iterator<Item = (&'a String, &'a FileMeta)>) -> Parts {
     let mut parts = Parts::new();
     for (path, meta) in files {
-        let bucket = if path.starts_with("target/slapslop/") {
-            "slapslop"
-        } else if path.starts_with("target/release/") {
-            "release"
-        } else if path.starts_with("target/") {
-            "cargo"
-        } else {
-            "source"
-        };
-        *parts.entry(bucket).or_default() += meta.size;
+        *parts
+            .entry(if path.starts_with("target/slapslop/") {
+                "slapslop"
+            } else if path.starts_with("target/release/") {
+                "release"
+            } else if path.starts_with("target/") {
+                "cargo"
+            } else {
+                "source"
+            })
+            .or_default() += meta.size;
     }
     parts
 }
 
 async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
-    let out = checked(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"])).await?;
-    Ok(out
+    Ok(checked(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"]))
+        .await?
         .lines()
         .filter_map(|line| {
             let mut fields = line.split('\t');
             let path = fields.next()?.to_owned();
-            let size = fields.next()?.parse().ok()?;
-            Some((path, FileMeta { size, mtime: fields.next()?.to_owned() }))
+            Some((path, FileMeta { size: fields.next()?.parse().ok()?, mtime: fields.next()?.to_owned() }))
         })
         .collect())
 }

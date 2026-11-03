@@ -107,8 +107,10 @@ impl Sandbox<'_> {
 
     pub(crate) async fn slapslop(self, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
         let out = self.run(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl && {cmd}"), None).await?;
-        let hits = self.run(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl 2>/dev/null || true"), None).await?;
-        Ok((out, diag::parse(&hits.stdout)))
+        Ok((
+            out,
+            diag::parse(&self.run(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl 2>/dev/null || true"), None).await?.stdout),
+        ))
     }
 }
 
@@ -132,8 +134,9 @@ impl Output {
 
     pub(crate) fn tail(&self) -> String {
         let text = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
-        let start = text.len().saturating_sub(TAIL_BYTES);
-        let start = (start..text.len()).find(|&index| text.is_char_boundary(index)).unwrap_or(text.len());
+        let start = (text.len().saturating_sub(TAIL_BYTES)..text.len())
+            .find(|&index| text.is_char_boundary(index))
+            .unwrap_or(text.len());
         text.get(start..).unwrap_or_default().to_owned()
     }
 }

@@ -152,6 +152,7 @@ fn checks_patches_against_warm_generations() {
     let ids = curl("POST", &format!("{}/check", warmd.url), Some(&body)).unwrap();
     let live = curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["live"].clone();
     assert!(live.as_array().unwrap().iter().any(|job| job["kind"] == "full"), "{live:#}");
+    assert!(live.as_array().unwrap().iter().all(|job| job["request"]["patch_lines"].as_u64() > Some(0)), "{live:#}");
     let job = warmd.wait(ids["id"].as_str().unwrap());
     let full_job = warmd.wait(ids["full_id"].as_str().unwrap());
     let report = &job["result"];
@@ -280,6 +281,7 @@ fn checks_patches_against_warm_generations() {
     let checks = stats["repos"][0]["checks"].as_array().unwrap();
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
+    assert_eq!(first["fields"]["request"]["full"], true, "{first:#}");
     assert_eq!(first["fields"]["ran_on"], json!(base));
     assert_eq!((first["fields"]["base"].clone(), first["fields"]["dirty"].clone()), (json!(base), json!(true)));
     until(|| {
