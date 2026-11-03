@@ -275,6 +275,14 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
     let fmt = job["result"]["jobs"].as_array().unwrap().iter().find(|job| job["name"] == "fmt").unwrap().clone();
     assert_eq!(fmt["new"], json!([]), "{job:#}");
+    let ugly = warmd.diff(
+        "printf 'mod m;\\n' >> src/lib.rs && printf 'pub fn ugly()->u32{1}\\n' > src/m.rs && git add -N src/m.rs",
+    );
+    sh(&warmd.root.join("demo"), "git rm -qf src/m.rs");
+    let job =
+        warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": ugly, "only": ["fmt"] }));
+    let rendered = job["result"]["jobs"][0]["new"][0]["rendered"].as_str().unwrap_or_default().to_owned();
+    assert!(rendered.starts_with("Diff in src/m.rs:"), "{job:#}");
 
     let repos = fs::read_to_string(warmd.root.join("repos.toml")).unwrap();
     fs::write(

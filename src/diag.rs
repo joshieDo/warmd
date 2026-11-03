@@ -130,7 +130,7 @@ fn rustfmt_diffs(stdout: &str) -> Vec<Diag> {
                 line: line_no,
                 message: "not formatted".to_owned(),
                 hazy: false,
-                rendered: format!("{line}\n"),
+                rendered: format!("Diff in {file}:{line_no}:\n"),
             });
         } else if let Some(last) = diags.last_mut() {
             last.rendered.push_str(line);
