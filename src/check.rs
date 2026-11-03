@@ -229,7 +229,8 @@ async fn run_step(
                 return Ok(Vec::new());
             }
             let packages = crates.iter().map(|krate| format!("-p {krate}")).collect::<Vec<_>>().join(" ");
-            let conf = conf_dir.as_ref().map(|dir| format!("CLIPPY_CONF_DIR='{}' ", dir.display())).unwrap_or_default();
+            let conf =
+                conf_dir.as_ref().map_or_else(String::new, |dir| format!("CLIPPY_CONF_DIR='{}' ", dir.display()));
             let cmd = format!("{conf}{} {targets} {packages} -- {}", repo.cfg().clippy, args.join(" "));
             let out = sandbox.run(&cmd, None).await?;
             Ok(diag::parse(&out.stdout))

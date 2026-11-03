@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime},
@@ -8,10 +9,9 @@ use std::{
 
 use anyhow::{Context as _, bail, ensure};
 use serde::Serialize;
-use serde_json::to_vec;
-use serde_json::{from_slice, json};
+use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
-    fs::{remove_file, rename, symlink_metadata, write},
+    fs::{read_to_string, remove_file, rename, symlink_metadata, write},
     process::Command,
     sync::{Semaphore, SemaphorePermit},
     time::sleep,
@@ -34,13 +34,20 @@ pub(crate) struct Repo {
     jobs_dir: PathBuf,
     gens_dir: PathBuf,
     metrics_file: PathBuf,
+    keep: Duration,
     gens: Mutex<Vec<Arc<Gen>>>,
     status: Mutex<Status>,
     building: tokio::sync::Mutex<()>,
 }
 
 impl Repo {
-    pub(crate) async fn open(name: String, cfg: RepoCfg, state_dir: &Path, slots: u16) -> anyhow::Result<Self> {
+    pub(crate) async fn open(
+        name: String,
+        cfg: RepoCfg,
+        state_dir: &Path,
+        slots: u16,
+        keep: Duration,
+    ) -> anyhow::Result<Self> {
         let gens_dir = state_dir.join(&name).join("gens");
         let jobs_dir = state_dir.join(&name).join("jobs");
         remove_tree(&jobs_dir).await?;
@@ -61,6 +68,7 @@ impl Repo {
             jobs_dir,
             gens_dir,
             metrics_file,
+            keep,
             gens: Mutex::new(gens),
             status: Mutex::new(status),
             building: tokio::sync::Mutex::new(()),
@@ -96,8 +104,41 @@ impl Repo {
     }
 
     pub(crate) fn view(&self) -> View {
-        let gens = self.gens().iter().map(|generation| generation.sha.clone()).collect::<Vec<_>>();
-        View { status: self.status().clone(), current: gens.last().cloned(), gens }
+        let all = self.gens();
+        let newest = all.len().saturating_sub(1);
+        let gens = all
+            .iter()
+            .enumerate()
+            .map(|(index, generation)| {
+                let age = generation.born.elapsed().unwrap_or_else(|ahead| {
+                    eprintln!(
+                        "warmd: {} generation {} is dated {:?} ahead",
+                        self.name,
+                        generation.sha,
+                        ahead.duration()
+                    );
+                    Duration::ZERO
+                });
+                let expires_in_secs = (index < newest).then(|| self.keep.saturating_sub(age).as_secs());
+                GenView { sha: generation.sha.clone(), age_secs: age.as_secs(), expires_in_secs }
+            })
+            .collect::<Vec<GenView>>();
+        let current = gens.last().map(|generation| generation.sha.clone());
+        drop(all);
+        View { status: self.status().clone(), current, gens }
+    }
+
+    pub(crate) async fn recent(&self, count: usize) -> Vec<Value> {
+        let text = match read_to_string(&self.metrics_file).await {
+            Ok(text) => text,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Vec::new(),
+            Err(err) => {
+                eprintln!("warmd: reading {}: {err}", self.metrics_file.display());
+                return Vec::new();
+            }
+        };
+        let lines = text.lines().collect::<Vec<_>>();
+        lines.iter().skip(lines.len().saturating_sub(count)).filter_map(|line| from_str(line).ok()).collect()
     }
 
     pub(crate) async fn refresh(&self, keep: Duration) -> anyhow::Result<()> {
@@ -226,7 +267,14 @@ impl Gen {
 pub(crate) struct View {
     status: Status,
     current: Option<String>,
-    gens: Vec<String>,
+    gens: Vec<GenView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GenView {
+    sha: String,
+    age_secs: u64,
+    expires_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]

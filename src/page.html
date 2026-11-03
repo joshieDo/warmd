@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warmd</title>
+<style>
+:root {
+  --bg: #f4f4f4; --surface: #fff; --line: rgba(0,0,0,.08); --text: #000; --muted: rgba(0,0,0,.55); --faint: rgba(0,0,0,.35);
+  --fill: rgba(0,0,0,.06); --positive: #138a3e; --warning: #c56a00; --negative: #d12f2f;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-feature-settings: "tnum";
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #000; --surface: #111; --line: rgba(255,255,255,.1); --text: #fff; --muted: rgba(255,255,255,.6); --faint: rgba(255,255,255,.35); --fill: rgba(255,255,255,.08); --positive: #3ccf6e; --warning: #ffa23a; --negative: #ff5c5c; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+main { max-width: 1100px; margin: 0 auto; padding: 32px 20px; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+h2 { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.stat .value { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
+.stat .sub { color: var(--muted); margin-top: 2px; }
+.bar { height: 4px; background: var(--fill); border-radius: 2px; margin-top: 10px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--text); }
+svg { width: 100%; height: 48px; display: block; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; }
+.muted { color: var(--muted); }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--faint); }
+.ready, .ok { background: var(--positive); } .refreshing, .running, .queued { background: var(--warning); } .failed { background: var(--negative); }
+.chip { display: inline-block; padding: 1px 6px; border-radius: 6px; background: var(--fill); margin: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>warmd</h1><span class="muted" id="updated"></span></header>
+  <section class="grid" id="machine"></section>
+  <section class="card"><h2>Repos</h2><table><thead><tr><th>Repo</th><th>State</th><th>Generations and TTL</th><th>Last build</th></tr></thead><tbody id="repos"></tbody></table></section>
+  <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const gb = b => (b / 1e9).toFixed(b < 1e10 ? 1 : 0) + " GB";
+const pct = (a, b) => b ? a * 100 / b : 0;
+const dur = s => s == null ? "–" : s < 60 ? s.toFixed(s < 10 ? 1 : 0) + "s" : s < 3600 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h";
+const ago = t => dur(Date.now() / 1000 - t) + " ago";
+const spark = (pts, key) => {
+  if (pts.length < 2) return "";
+  const w = 300, h = 48, x = i => i * w / (pts.length - 1), y = v => h - 2 - v * (h - 4) / 100;
+  const d = pts.map((p, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p[key]).toFixed(1)).join(" ");
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none"><path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>';
+};
+const stat = (label, value, sub, extra = "") => '<div class="card stat"><h2>' + label + '</h2><div class="value">' + value + '</div><div class="sub">' + sub + '</div>' + extra + '</div>';
+const bar = p => '<div class="bar"><div style="width:' + Math.min(p, 100).toFixed(1) + '%"></div></div>';
+const dot = s => '<span class="dot ' + esc(s) + '"></span>';
+async function load() {
+  const s = await (await fetch("/stats")).json();
+  const m = s.machine, now = m.now || { cpu: 0, mem: 0 };
+  $("machine").innerHTML =
+    stat("CPU", now.cpu.toFixed(0) + "%", "peak 24h " + m.peak_cpu.toFixed(0) + "% · " + m.cores + " threads · load " + m.load.map(l => l.toFixed(1)).join(" "), spark(m.history, "cpu")) +
+    stat("Memory", gb(m.mem_used), "of " + gb(m.mem_total) + " · peak 24h " + m.peak_mem.toFixed(0) + "%", spark(m.history, "mem")) +
+    m.disks.map(d => stat("Disk " + esc(d.mount), pct(d.used, d.size).toFixed(0) + "%", gb(d.used) + " of " + gb(d.size), bar(pct(d.used, d.size)))).join("") +
+    stat("Jobs", s.jobs.running + s.jobs.queued, s.jobs.running + " running · " + s.jobs.queued + " queued · " + s.jobs.done + " done · " + s.jobs.failed + " failed");
+  $("repos").innerHTML = s.repos.map(r => {
+    const v = r.view, st = v.status, b = r.last_build;
+    const gens = v.gens.map(g => '<span class="chip"><code>' + esc(g.sha.slice(0, 7)) + '</code> ' + (g.expires_in_secs == null ? "current" : "TTL " + dur(g.expires_in_secs)) + ' · ' + dur(g.age_secs) + ' old</span>').join("");
+    const build = b ? dur(b.total_secs) + ' <span class="muted">' + ago(b.at) + (b.fields.ok ? "" : " · failed") + '</span>' : '<span class="muted">–</span>';
+    return '<tr><td><b>' + esc(r.name) + '</b></td><td>' + dot(st.state) + esc(st.state) + (st.error ? '<div class="muted">' + esc(st.error.slice(-160)) + '</div>' : "") + '</td><td>' + (gens || '<span class="muted">none</span>') + '</td><td>' + build + '</td></tr>';
+  }).join("");
+  $("jobs").innerHTML = s.recent.map(j => {
+    const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
+    const res = String(j.fields.result ?? (j.fields.ok ? "ok" : "failed"));
+    const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
+    return '<tr><td class="muted">' + ago(j.at) + '</td><td>' + esc(j.fields.repo) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(cls) + esc(res.slice(0, 60)) + '</td><td>' + dur(j.total_secs) + '</td><td>' + slow + '</td></tr>';
+  }).join("") || '<tr><td colspan="6" class="muted">No jobs yet</td></tr>';
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+}
+load(); setInterval(load, 5000);
+</script>
+</body>
+</html>

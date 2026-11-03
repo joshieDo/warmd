@@ -1,11 +1,10 @@
-use std::{
-    path::Path,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{path::Path, time::Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json, to_string};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt as _};
+
+use crate::stats::now_secs;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Phase {
@@ -46,7 +45,7 @@ impl Clock {
 }
 
 pub(crate) async fn record(file: &Path, kind: &str, fields: Value, clock: &Clock) {
-    let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    let at = now_secs();
     let line =
         json!({ "at": at, "kind": kind, "fields": fields, "total_secs": clock.total_secs(), "phases": clock.phases() });
     let written = async {

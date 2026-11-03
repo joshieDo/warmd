@@ -5,8 +5,7 @@ use std::{
 };
 
 use anyhow::Context as _;
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use toml::from_str;
 
 #[derive(Debug, Deserialize)]

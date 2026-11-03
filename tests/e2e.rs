@@ -176,6 +176,13 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": gone }, "patch": "" }));
     assert_eq!(job["result"]["rebased_from"], gone);
 
+    let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
+    assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
+    assert_eq!(stats["repos"][0]["view"]["gens"].as_array().unwrap().len(), 2, "{stats:#}");
+    assert!(stats["repos"][0]["view"]["gens"][0]["expires_in_secs"].is_u64(), "{stats:#}");
+    assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");
+    assert!(!stats["recent"].as_array().unwrap().is_empty(), "{stats:#}");
+    assert!(sh(&warmd.root, &format!("curl -sf {}/", warmd.url)).contains("/stats"));
     let metrics = fs::read_to_string(warmd.root.join("state/demo/metrics.jsonl")).unwrap();
     let kinds = metrics.lines().map(|line| from_str::<Value>(line).unwrap()["kind"].clone()).collect::<Vec<_>>();
     assert!(kinds.contains(&json!("build")), "{kinds:?}");

@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     env,
     path::PathBuf,
@@ -11,13 +12,13 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::Html,
     routing::{get, post},
     serve,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
-use tokio::spawn;
+use tokio::{net::TcpListener, spawn};
 use uuid::Uuid;
 
 use crate::{
@@ -25,6 +26,7 @@ use crate::{
     config::Profile,
     metrics::{Clock, Phase},
     repo::{Repo, View},
+    stats::Machine,
 };
 
 mod check;
@@ -33,8 +35,13 @@ mod diag;
 mod metrics;
 mod repo;
 mod sandbox;
+mod stats;
 
 const SECS_PER_HOUR: u64 = 3600;
+
+const RECENT_PER_REPO: usize = 30;
+
+const RECENT_JOBS: usize = 25;
 
 type Reply<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -60,6 +67,8 @@ struct App {
     profiles: BTreeMap<String, Profile>,
     jobs: Mutex<HashMap<Uuid, Job>>,
     keep: Duration,
+    machine: Machine,
+    state_dir: PathBuf,
 }
 
 impl App {
@@ -88,12 +97,23 @@ async fn main() -> anyhow::Result<()> {
     let poll_every = Duration::from_secs(config.poll_secs);
     let mut repos = BTreeMap::new();
     for (name, cfg) in config.repos {
-        let repo = Arc::new(Repo::open(name.clone(), cfg, &config.state_dir, config.jobs_per_repo).await?);
+        let repo = Arc::new(Repo::open(name.clone(), cfg, &config.state_dir, config.jobs_per_repo, keep).await?);
         spawn(repo::poll(Arc::clone(&repo), poll_every, keep));
         repos.insert(name, repo);
     }
-    let app = Arc::new(App { repos, profiles, jobs: Mutex::default(), keep });
+    let app = Arc::new(App {
+        repos,
+        profiles,
+        jobs: Mutex::default(),
+        keep,
+        machine: Machine::default(),
+        state_dir: config.state_dir.clone(),
+    });
+    let sampler = Arc::clone(&app);
+    spawn(async move { sampler.machine.sample_forever().await });
     let router = Router::new()
+        .route("/", get(page))
+        .route("/stats", get(stats_view))
         .route("/check", post(submit))
         .route("/slapslop/baseline", post(slapslop_baseline))
         .route("/jobs/{id}", get(job))
@@ -141,4 +161,33 @@ async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Job> {
 
 async fn repo_view(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<View> {
     Ok(Json(app.repo(&name)?.view()))
+}
+
+async fn page() -> Html<&'static str> {
+    Html(include_str!("page.html"))
+}
+
+async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
+    let mut repos = Vec::with_capacity(app.repos.len());
+    let mut recent = Vec::new();
+    for (name, repo) in &app.repos {
+        let history = repo.recent(RECENT_PER_REPO).await;
+        let last_build = history.iter().rev().find(|record| record["kind"] == "build").cloned();
+        recent.extend(history.into_iter().filter(|record| record["kind"] != "build"));
+        repos.push(json!({ "name": name, "view": repo.view(), "last_build": last_build }));
+    }
+    recent.sort_by_key(|record| Reverse(record["at"].as_u64()));
+    recent.truncate(RECENT_JOBS);
+    let mut counts = BTreeMap::from([("queued", 0_u32), ("running", 0), ("done", 0), ("failed", 0)]);
+    for job in app.jobs.lock().unwrap_or_else(PoisonError::into_inner).values() {
+        let state = match job {
+            Job::Queued => "queued",
+            Job::Running => "running",
+            Job::Done { .. } => "done",
+            Job::Failed { .. } => "failed",
+        };
+        *counts.entry(state).or_default() += 1;
+    }
+    let machine = app.machine.view(&app.state_dir).await;
+    Json(json!({ "machine": machine, "repos": repos, "recent": recent, "jobs": counts }))
 }
