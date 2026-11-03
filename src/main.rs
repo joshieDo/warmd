@@ -20,8 +20,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
+    process::Command,
     signal::unix::{SignalKind, signal},
     spawn,
+    time::sleep,
 };
 use uuid::Uuid;
 
@@ -42,6 +44,8 @@ mod sandbox;
 mod stats;
 
 const SECS_PER_HOUR: u64 = 3600;
+
+const PRUNE_EVERY: Duration = Duration::from_hours(1);
 
 const RECENT_PER_REPO: usize = 100;
 
@@ -152,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
+        spawn(prune_remote_forever(PathBuf::from(remote)));
+    }
     let sampler = Arc::clone(&app);
     spawn(async move { sampler.machine.sample_forever().await });
     let router = Router::new()
@@ -250,4 +257,16 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
     }
     let machine = app.machine.view(&app.state_dir).await;
     Json(json!({ "machine": machine, "repos": repos, "recent": recent, "jobs": counts }))
+}
+
+async fn prune_remote_forever(dir: PathBuf) -> ! {
+    let days = (RETAIN_SECS / 86_400).to_string();
+    loop {
+        if let Err(err) =
+            Command::new("find").arg(&dir).args(["-type", "f", "-mtime", &format!("+{days}"), "-delete"]).status().await
+        {
+            eprintln!("warmd: pruning {}: {err}", dir.display());
+        }
+        sleep(PRUNE_EVERY).await;
+    }
 }
