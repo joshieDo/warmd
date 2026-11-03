@@ -185,6 +185,22 @@ fn checks_patches_against_warm_generations() {
     assert!(codes(&report["jobs"][0]["new"]).contains(&"clippy::must_use_candidate"), "{report:#}");
     assert!(codes(&report["jobs"][1]["new"]).iter().all(|code| *code == "wide_tuple"), "{report:#}");
 
+    let first = warmd.diff("printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
+    let session =
+        |patch: &str| json!({ "repo": "demo", "base": { "sha": base }, "patch": patch, "session": "feat/first" });
+    let job = warmd.job("check", &session(&first));
+    assert_eq!(job["result"]["session_reused"], false, "{job:#}");
+    assert_eq!(codes(&job["result"]["jobs"][0]["new"]), ["clippy::ptr_arg"]);
+    let fixed = warmd.diff("printf '\npub fn first(v: &[u32]) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
+    let job = warmd.job("check", &session(&fixed));
+    assert_eq!(job["result"]["session_reused"], true, "{job:#}");
+    assert!(job["result"]["jobs"][0]["new"].as_array().unwrap().is_empty(), "{job:#}");
+    let job = warmd.job("check", &session(""));
+    assert_eq!(job["result"]["session_reused"], true, "{job:#}");
+    assert_eq!(job["result"]["ok"], true, "{job:#}");
+    let job = warmd.job("check", &session(&first));
+    assert_eq!(codes(&job["result"]["jobs"][0]["new"]), ["clippy::ptr_arg"]);
+
     let patch = warmd.diff("printf '\npub fn none(v: &[u32]) -> bool {\n    v.len() == 0\n}\n' >> src/lib.rs");
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": base }, "patch": patch, "fix": true }));
     assert!(job["result"]["fix_patch"].as_str().unwrap().contains("is_empty()"), "{job:#}");

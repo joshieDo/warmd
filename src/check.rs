@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context as _, bail, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, json};
-use tokio::fs::create_dir_all;
+use serde_json::{Value, from_str, json};
+use tokio::fs::{create_dir_all, read_to_string, write};
 
 use crate::{
     config::{ArgsOverride, FULL_CLIPPY, Profile, Step},
@@ -14,9 +14,26 @@ use crate::{
     metrics::{self, Clock, Phase},
     repo::{self, Repo},
     sandbox::{self, Sandbox, Tree},
+    stats::now_secs,
 };
 
 const SLAPSLOP_BASELINE: &str = ".slapslop/baseline.toml";
+
+const COMMIT: &str = "git -c user.name=warmd -c user.email=warmd@localhost commit -q --no-verify --allow-empty";
+
+const SYNC_TREE: &str = r#"set -eu
+index=$(mktemp)
+GIT_INDEX_FILE=$index git read-tree {gen}
+if {apply}; then GIT_INDEX_FILE=$index git apply --cached -; fi
+tree=$(GIT_INDEX_FILE=$index git write-tree)
+rm -f "$index"
+{ git diff --name-only --no-renames HEAD "$tree"; git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u | while IFS= read -r path; do
+  if git cat-file -e "$tree:$path" 2>/dev/null; then git checkout -q "$tree" -- "$path"; else rm -f -- "$path"; git rm -q --cached --ignore-unmatch -- "$path"; fi
+done
+commit=$(git -c user.name=warmd -c user.email=warmd@localhost commit-tree "$tree" -p {gen} -m patch)
+git reset -q --soft "$commit"
+git read-tree "$commit"
+"#;
 
 const FULL_NOTICE: &str = "Advisory: the full set (slapslop --all-lints and slapslop's recommended clippy set) on your added lines. Fix what you reasonably can; hazy hits and deliberate patterns may stay. Only the CI jobs (ok / ok_precise) decide whether the change can merge.";
 
@@ -35,6 +52,7 @@ pub(crate) struct Request {
     branch: Option<String>,
     #[serde(default)]
     args: BTreeMap<String, ArgsOverride>,
+    session: Option<String>,
     #[serde(skip)]
     baseline_only: bool,
     #[serde(skip)]
@@ -64,6 +82,7 @@ impl Request {
 pub(crate) struct Report {
     ok: bool,
     ok_precise: bool,
+    session_reused: bool,
     ran_on: String,
     rebased_from: Option<String>,
     main_moved: bool,
@@ -222,9 +241,24 @@ pub(crate) async fn run(
         "check"
     };
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
-    let outcome = check(repo, full, req, layer, running, &mut clock).await;
+    let (layer, session_guard) = match req.session.clone().filter(|_| !req.full_only) {
+        Some(name) => {
+            let (dir, guard) = repo.session(&name).await;
+            (dir, Some(guard))
+        }
+        None => (layer.to_owned(), None),
+    };
+    let outcome = check(repo, full, req, &layer, running, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
-    if let Err(err) = repo::remove_tree(layer).await {
+    let keep =
+        session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none());
+    if keep {
+        let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
+        let meta = json!({ "gen": built_on, "used_at": now_secs() }).to_string();
+        if let Err(err) = write(layer.join("meta.json"), meta).await {
+            eprintln!("warmd: {}: {err:#}", repo.name());
+        }
+    } else if let Err(err) = repo::remove_tree(&layer).await {
         eprintln!("warmd: {}: {err:#}", repo.name());
     }
     clock.mark("cleanup");
@@ -274,6 +308,11 @@ async fn check(
     let _slot = repo.slot().await?;
     running();
     clock.mark("queued");
+    let meta = read_to_string(layer.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
+    let session_reused = rebased_from.is_none() && meta.is_some_and(|meta| meta["gen"] == generation.sha());
+    if !session_reused {
+        repo::remove_tree(layer).await?;
+    }
     let (upper, work) = (layer.join("upper"), layer.join("work"));
     create_dir_all(&upper).await?;
     create_dir_all(&work).await?;
@@ -281,23 +320,34 @@ async fn check(
     let sandbox =
         Sandbox { repo: repo.name(), tree: Tree::Overlay { lower: generation.dir(), upper: &upper, work: &work } };
 
-    let apply = if rebased_from.is_some() { "git apply --3way -" } else { "git apply --index -" };
-    let applied = if req.patch.trim().is_empty() { None } else { Some(sandbox.run(apply, Some(&req.patch)).await?) };
-    if let Some(applied) = applied.filter(|applied| !applied.ok()) {
-        if rebased_from.is_some() {
+    if rebased_from.is_some() {
+        let applied = if req.patch.trim().is_empty() {
+            None
+        } else {
+            Some(sandbox.run("git apply --3way -", Some(&req.patch)).await?)
+        };
+        if applied.is_some_and(|applied| !applied.ok()) {
             let conflicted = sandbox.run("git diff --name-only --diff-filter=U", None).await?;
             return Ok(Outcome::RebaseNeeded { files: conflicted.stdout.lines().map(str::to_owned).collect() });
         }
-        bail!("the patch does not apply to {}: {}", generation.sha(), applied.stderr.trim());
+        let commit = format!("git add -A && {COMMIT} -m patch");
+        let committed = sandbox.run(&commit, None).await?;
+        ensure!(committed.ok(), "committing the patch: {}", committed.stderr.trim());
+    } else {
+        let script = SYNC_TREE
+            .replace("{gen}", generation.sha())
+            .replace("{apply}", if req.patch.trim().is_empty() { "false" } else { "true" });
+        let synced = sandbox.run(&script, Some(&req.patch)).await?;
+        ensure!(synced.ok(), "the patch does not apply to {}: {}", generation.sha(), synced.stderr.trim());
     }
     clock.mark("apply");
     if let Some(baseline) = &req.slapslop_baseline {
         let written = sandbox.run(&format!("mkdir -p .slapslop && cat > {SLAPSLOP_BASELINE}"), Some(baseline)).await?;
         ensure!(written.ok(), "writing the slapslop baseline: {}", written.stderr.trim());
+        let commit = format!("git add -A && {COMMIT} --amend --no-edit");
+        let committed = sandbox.run(&commit, None).await?;
+        ensure!(committed.ok(), "committing the baseline: {}", committed.stderr.trim());
     }
-    let commit = "git add -A && git -c user.name=warmd -c user.email=warmd@localhost commit -q --no-verify --allow-empty -m patch";
-    let committed = sandbox.run(commit, None).await?;
-    ensure!(committed.ok(), "committing the patch: {}", committed.stderr.trim());
     clock.mark("commit");
     if req.baseline_only {
         let update = "cargo-slapslop baseline update \"$PWD\" --accept-new --reason warmd >&2 && cat ";
@@ -370,7 +420,7 @@ async fn check(
     let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none());
     let ran_on = generation.sha().to_owned();
     let ok_precise = jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none());
-    let report = Report { ok, ok_precise, ran_on, rebased_from, main_moved, jobs, full, fix_patch };
+    let report = Report { ok, ok_precise, session_reused, ran_on, rebased_from, main_moved, jobs, full, fix_patch };
     Ok(Outcome::Checked(report))
 }
 

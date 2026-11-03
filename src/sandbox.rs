@@ -50,11 +50,18 @@ impl Sandbox<'_> {
         bwrap.args(["--die-with-parent", "--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]);
         bwrap.args(["--tmpfs", "/tmp"]);
         match self.tree {
-            Tree::Build(dir) => {
+            Tree::Build { dir, cache: repo_cache } => {
                 bwrap.arg("--share-net");
-                for shared in [&cargo_home, &rustup_home, &cache] {
+                for shared in [&cargo_home, &rustup_home] {
                     bwrap.arg("--bind").arg(shared).arg(shared);
                 }
+                bwrap
+                    .arg("--overlay-src")
+                    .arg(&cache)
+                    .arg("--overlay")
+                    .arg(repo_cache.join("upper"))
+                    .arg(repo_cache.join("work"))
+                    .arg(&cache);
                 bwrap.arg("--bind").arg(dir).arg(&work);
             }
             Tree::Overlay { lower, upper, work: overlay_work } => {
@@ -103,7 +110,7 @@ impl Sandbox<'_> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Tree<'a> {
-    Build(&'a Path),
+    Build { dir: &'a Path, cache: &'a Path },
     Overlay { lower: &'a Path, upper: &'a Path, work: &'a Path },
 }
 

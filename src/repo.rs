@@ -17,7 +17,7 @@ use tokio::{
     fs::{read_to_string, remove_file, rename, symlink_metadata, write},
     process::Command,
     spawn,
-    sync::{Semaphore, SemaphorePermit},
+    sync::{OwnedMutexGuard, Semaphore, SemaphorePermit},
     time::sleep,
 };
 
@@ -26,7 +26,10 @@ use crate::{
     diag::Diag,
     metrics::{self, Clock, Phase},
     sandbox::{Sandbox, Tree},
+    stats::now_secs,
 };
+
+const SESSION_IDLE: Duration = Duration::from_mins(30);
 
 type Baseline = BTreeMap<String, Vec<Diag>>;
 
@@ -45,6 +48,7 @@ pub(crate) struct Repo {
     gens: Mutex<Vec<Arc<Gen>>>,
     status: Mutex<Status>,
     building: tokio::sync::Mutex<()>,
+    sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Repo {
@@ -88,6 +92,7 @@ impl Repo {
             gens: Mutex::new(gens),
             status: Mutex::new(status),
             building: tokio::sync::Mutex::new(()),
+            sessions: Mutex::default(),
         })
     }
 
@@ -109,6 +114,36 @@ impl Repo {
 
     pub(crate) fn metrics_file(&self) -> PathBuf {
         self.metrics_file.clone()
+    }
+
+    pub(crate) async fn session(&self, name: &str) -> (PathBuf, OwnedMutexGuard<()>) {
+        let lock = Arc::clone(
+            self.sessions.lock().unwrap_or_else(PoisonError::into_inner).entry(name.to_owned()).or_default(),
+        );
+        let guard = lock.lock_owned().await;
+        let key = name
+            .bytes()
+            .map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte) } else { '_' })
+            .collect::<String>();
+        (self.jobs_dir.join("sessions").join(key), guard)
+    }
+
+    async fn prune_sessions(&self, idle: Duration) -> anyhow::Result<()> {
+        let live = self.gens().iter().map(|generation| generation.sha.clone()).collect::<Vec<_>>();
+        let names = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect::<Vec<_>>();
+        for name in names {
+            let (dir, _guard) = self.session(&name).await;
+            let meta = read_to_string(dir.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
+            let stale = meta.as_ref().is_none_or(|meta| {
+                let used = meta["used_at"].as_u64().unwrap_or_default();
+                used + idle.as_secs() < now_secs() || !live.iter().any(|sha| meta["gen"] == sha.as_str())
+            });
+            if stale {
+                remove_tree(&dir).await?;
+                self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn jobs_dir(&self) -> &Path {
@@ -266,7 +301,10 @@ impl Repo {
         clock.mark("checkout");
         git(&tmp, &["submodule", "update", "--quiet", "--init", "--recursive"]).await?;
         clock.mark("submodules");
-        let sandbox = Sandbox { repo: &self.name, tree: Tree::Build(&tmp) };
+        let cache = self.gens_dir.with_file_name("cache");
+        fs::create_dir_all(cache.join("upper"))?;
+        fs::create_dir_all(cache.join("work"))?;
+        let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &tmp, cache: &cache } };
         let mut baseline = Baseline::new();
         for job in self.cfg().jobs.clone() {
             let (out, found) = sandbox.diagnose(&job, &job.render(&job.cmd, None)).await?;
@@ -402,6 +440,9 @@ pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
     while !repo.retired.load(Ordering::Relaxed) {
         if let Err(err) = repo.refresh(keep).await {
             eprintln!("warmd: {}: {err:#}", repo.name);
+        }
+        if let Err(err) = repo.prune_sessions(SESSION_IDLE).await {
+            eprintln!("warmd: {} sessions: {err:#}", repo.name);
         }
         sleep(every).await;
     }
