@@ -126,6 +126,14 @@ impl Repo {
                 Part { jobs: names, bytes: *bytes }
             })
             .collect::<Vec<_>>();
+        labeled.sort_by(|left, right| left.jobs.cmp(&right.jobs));
+        labeled.dedup_by(|next, kept| {
+            let same = next.jobs == kept.jobs;
+            if same {
+                kept.bytes += next.bytes;
+            }
+            same
+        });
         let idle = names(&|job| !labeled.iter().any(|part| part.jobs.contains(&job.name)));
         if !idle.is_empty() {
             labeled.push(Part { jobs: idle, bytes: 0 });
