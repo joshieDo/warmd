@@ -281,7 +281,7 @@ fn checks_patches_against_warm_generations() {
     let checks = stats["repos"][0]["checks"].as_array().unwrap();
     let first = checks.iter().find(|check| check["fields"]["branch"] == "feat/first").unwrap();
     assert!(first["fields"]["layer_bytes"].as_u64() > Some(0), "{first:#}");
-    assert_eq!(first["fields"]["request"]["full"], true, "{first:#}");
+    assert!(first["fields"]["request"]["patch_lines"].as_u64() > Some(0), "{first:#}");
     assert_eq!(first["fields"]["ran_on"], json!(base));
     assert_eq!((first["fields"]["base"].clone(), first["fields"]["dirty"].clone()), (json!(base), json!(true)));
     until(|| {
