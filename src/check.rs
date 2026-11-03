@@ -303,6 +303,7 @@ pub(crate) async fn run(
     req: Request,
     layer: &Path,
     running: impl FnOnce(),
+    progress: impl Fn(Value),
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
     let kind = req.kind();
@@ -316,7 +317,7 @@ pub(crate) async fn run(
         }
         None => (layer.to_owned(), None),
     };
-    let outcome = check(repo, full, req, &layer, running, &mut clock).await;
+    let outcome = check(repo, full, req, &layer, running, progress, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none()) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
@@ -356,6 +357,7 @@ async fn check(
     req: Request,
     layer: &Path,
     running: impl FnOnce(),
+    progress: impl Fn(Value),
     clock: &mut Clock,
 ) -> anyhow::Result<Outcome> {
     let cfg = repo.cfg();
@@ -458,7 +460,7 @@ async fn check(
     let packages = Scope::flags(&scope.touched);
 
     let all_jobs = &cfg.jobs;
-    let mut jobs = Vec::with_capacity(all_jobs.len());
+    let mut planned = Vec::with_capacity(all_jobs.len());
     for job in all_jobs.iter().filter(|job| {
         !req.full_only
             && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
@@ -476,11 +478,19 @@ async fn check(
             },
             _ => job.cmd.clone(),
         };
+        planned.push((job, template));
+    }
+    planned.sort_by_key(|(job, _)| job.slapslop);
+    let mut jobs = Vec::with_capacity(planned.len());
+    for (index, (job, template)) in planned.iter().enumerate() {
+        progress(
+            json!({ "partial": jobs, "pending": planned[index..].iter().map(|(job, _)| &job.name).collect::<Vec<_>>() }),
+        );
         let custom = req
             .args
             .get(&job.name)
             .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
-        let (out, mut found) = sandbox.diagnose(job, &job.render(&template, custom)).await?;
+        let (out, mut found) = sandbox.diagnose(job, &job.render(template, custom)).await?;
         let output = (!out.ok() && found.is_empty()).then(|| out.tail());
         let new = if custom.is_some() {
             found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));

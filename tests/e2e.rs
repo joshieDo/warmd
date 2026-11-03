@@ -164,10 +164,10 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(report["ok"], false);
     assert_eq!(report["ok_precise"], false);
     assert_eq!(report["main_moved"], false);
-    assert_eq!(names(&report["jobs"]), ["clippy", "slapslop", "fmt"]);
+    assert_eq!(names(&report["jobs"]), ["clippy", "fmt", "slapslop"]);
     assert!(!names(&report["jobs"]).contains(&"bins"), "a lib-only patch skips bins_only jobs");
     assert_eq!(codes(&report["jobs"][0]["new"]), ["clippy::ptr_arg"]);
-    let slapslop = report["jobs"][1]["new"].as_array().unwrap();
+    let slapslop = report["jobs"][2]["new"].as_array().unwrap();
     assert!(slapslop.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{slapslop:#?}");
     assert!(slapslop.iter().any(|hit| hit["hazy"] == true), "{slapslop:#?}");
     let full = &full_job["result"]["full"];

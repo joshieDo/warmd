@@ -57,7 +57,7 @@ type Reply<T> = Result<Json<T>, (StatusCode, String)>;
 #[serde(tag = "state", rename_all = "snake_case")]
 enum Job {
     Queued,
-    Running,
+    Running { progress: Option<Value> },
     Done { result: Done, phases: Vec<Phase> },
     Failed { error: String, phases: Vec<Phase> },
 }
@@ -217,12 +217,13 @@ fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
     spawn(async move {
         let layer = repo.jobs_dir().join(id.to_string());
         let running = || {
-            app.set(id, Job::Running);
+            app.set(id, Job::Running { progress: None });
             if let Some(entry) = app.live.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&id) {
                 entry.running_since = Some(now_secs());
             }
         };
-        let (outcome, phases) = with_commands(check::run(&repo, &app.full, req, &layer, running)).await;
+        let progress = |value| app.set(id, Job::Running { progress: Some(value) });
+        let (outcome, phases) = with_commands(check::run(&repo, &app.full, req, &layer, running, progress)).await;
         app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
         app.finish(id, outcome.map(Done::Check), phases);
     });
@@ -236,7 +237,7 @@ async fn slapslop_baseline(app: State<Arc<App>>, Json(req): Json<Request>) -> Re
 async fn refresh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<Value> {
     let repo = app.repo(&name)?;
     let id = Uuid::new_v4();
-    app.set(id, Job::Running);
+    app.set(id, Job::Running { progress: None });
     spawn(async move {
         let mut clock = Clock::start();
         let result = repo.refresh(app.keep).await.map(|()| Done::Refresh(repo.view()));
@@ -290,7 +291,7 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
     for (_, job) in app.jobs.lock().unwrap_or_else(PoisonError::into_inner).values() {
         let state = match job {
             Job::Queued => "queued",
-            Job::Running => "running",
+            Job::Running { .. } => "running",
             Job::Done { .. } => "done",
             Job::Failed { .. } => "failed",
         };

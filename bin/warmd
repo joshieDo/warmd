@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+exec 3>&1
 
 url=${WARMD_URL:-http://dev-joshie.tail388b2e.ts.net:7878}
 
@@ -26,19 +27,33 @@ push_nudge() {
 }
 
 wait_job() {
-  local job state
+  local job state shown=0 pending
   while :; do
     job=$(curl -fsS "$url/jobs/$1")
     state=$(jq -r .state <<<"$job")
     [[ $state == "done" || $state == "failed" ]] && break
+    if [[ $(jq '.progress.partial | length' <<<"$job") -gt $shown ]]; then
+      show_jobs "$job" .progress.partial "$shown"
+      shown=$(jq '.progress.partial | length' <<<"$job")
+      pending=$(jq -r '.progress.pending | join(", ")' <<<"$job")
+      [[ -n $pending ]] && echo "warmd: still running: $pending (results above are final; keep working, track again later or wait)" >&2
+    fi
     sleep 1
   done
+  [[ $state == "done" ]] && show_jobs "$job" '(.result.jobs // [])' "$shown"
   jq -r '.phases | map("\(.name) \(.secs * 10 | floor / 10)s") | join(" · ")' <<<"$job" >&2
   if [[ $state == "failed" ]]; then
     jq -r .error <<<"$job" >&2
     return 1
   fi
   printf '%s' "$job"
+}
+
+# Prints the results of jobs [from..] of the list at path: findings on stdout (fd 3), one status line each on stderr.
+show_jobs() {
+  jq -r "$2 | .[$3:][] | select((.new | length) > 0 or .output != null) |
+    \"== \\(.name)\\n\" + (.new | map(.rendered) | join(\"\")) + (.output // \"\")" <<<"$1" >&3
+  jq -r "$2 | .[$3:][] | \"warmd: \\(.name) \" + (if (.new | length) == 0 and .output == null then \"ok\" else \"\\(.new | length) new finding(s)\" + (if .output then \", failed\" else \"\" end) end)" <<<"$1" >&2
 }
 
 track() {
@@ -50,8 +65,6 @@ track() {
     jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
     return 1
   fi
-  jq -r '.result.jobs[] | select((.new | length) > 0 or .output != null) |
-    "== \(.name)\n" + (.new | map(.rendered) | join("")) + (.output // "")' <<<"$job"
   ok=$(jq -r .result.ok <<<"$job")
   if [[ $ok == true ]]; then echo "warmd: CI ok" >&2; else echo "warmd: CI found issues (these must be fixed to merge)" >&2; fi
   if [[ -n $full_id ]]; then
