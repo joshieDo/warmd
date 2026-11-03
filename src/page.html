@@ -207,9 +207,9 @@ function tree(i) {
   const mainSec = main ? '<h2>Main build</h2><p class="muted">' + commit(main.sha) + ' · ' + dur(main.age_secs) + ' old · ' + size(main.bytes) + ' · shared by every check, never expires while it is main</p>' +
     table(["Part", "Size"], mainParts.map(p => td(esc(label(p)), gb(p.bytes))), "not measured yet") : '<h2>Main build</h2><p class="muted">none yet</p>';
   const oldSec = '<h2>Older builds</h2>' + table(["Commit", "Own size", "Age", "Deleted in"], older.map(g => td(commit(g.sha), size(g.own_bytes), dur(g.age_secs), dur(g.expires_in_secs))), "none: only main is kept");
-  const sessSec = '<h2>Sessions</h2><p class="muted">One per branch: its own changes and build outputs on top of main. Deleted after 30 min idle or when main moves.</p>' +
-    table(["Branch", "Size", "Idle", "Deleted in", "Base"], sessions.map(s => td(esc(s.name), size(s.bytes), dur(s.idle_secs), dur(s.expires_in_secs), s.on_main ? "main" : '<span class="muted">older build</span>')), "no live sessions");
-  const checkSec = '<h2>Recent checks</h2>' + table(["Branch", "Kind", "Result", "Layer", "Took", "When"], checks.map(c => {
+  const sessSec = '<h2>Sessions</h2><p class="muted">One per branch. Size = what the branch adds on top of main: its changed files plus every build output it recompiled (the crates it touched and everything that depends on them, for cargo and slapslop). Main itself is shared, not counted. Deleted after 30 min idle.</p>' +
+    table(["Branch", "Adds on top of main", "Idle", "Deleted in", "Base"], sessions.map(s => td(esc(s.name), size(s.bytes), dur(s.idle_secs), dur(s.expires_in_secs), s.on_main ? "main" : '<span class="muted">older build</span>')), "no live sessions");
+  const checkSec = '<h2>Recent checks</h2>' + table(["Branch", "Kind", "Result", "Branch adds", "Took", "When"], checks.map(c => {
     const f = c.fields, res = String(f.result ?? "");
     const cls = res.startsWith("failed") ? "failed" : res === "ok" || res === "baseline" ? "ok" : "refreshing";
     return td(f.branch ? esc(f.branch) : f.base ? commit(f.base) : "–", esc(c.kind), dot(cls) + esc(res.slice(0, 50)), size(f.layer_bytes), dur(c.total_secs), ago(c.at));

@@ -323,7 +323,7 @@ pub(crate) async fn run(
     };
     let outcome = check(repo, full, req, &layer, running, progress, &mut clock).await;
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
-    if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(report)) if report.rebased_from.is_none()) {
+    if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(_))) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
         let meta = json!({ "gen": built_on, "used_at": now_secs(), "session": session_name, "bytes": layer_bytes })
             .to_string();
@@ -388,8 +388,8 @@ async fn check(
     let _slot = repo.slot().await?;
     running();
     clock.mark("queued");
-    let session_reused = rebased_from.is_none()
-        && (read_to_string(layer.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok()))
+    let session_reused =
+        (read_to_string(layer.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok()))
             .is_some_and(|meta| meta["gen"] == generation.sha());
     if !session_reused {
         repo::remove_tree(layer).await?;
@@ -402,6 +402,16 @@ async fn check(
         Sandbox { repo: repo.name(), tree: Tree::Overlay { lower: generation.dir(), upper: &upper, work: &work } };
 
     if rebased_from.is_some() {
+        if session_reused {
+            let reset = sandbox
+                .run_described(
+                    &format!("git reset --hard {}  # drop the session's last patch", &generation.sha()[..7]),
+                    &format!("git reset -q --hard {}", generation.sha()),
+                    None,
+                )
+                .await?;
+            ensure!(reset.ok(), "resetting the session: {}", reset.stderr.trim());
+        }
         if if req.patch.trim().is_empty() {
             None
         } else {

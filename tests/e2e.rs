@@ -264,6 +264,14 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(names(&job["result"]["jobs"]), ["clippy", "slapslop"]);
     assert_eq!(job["result"]["ok_precise"], true);
     let comment = warmd.diff("sed -i '1i // note' src/lib.rs");
+    let stale = json!({ "repo": "demo", "base": { "sha": gone }, "patch": comment, "session": "stale-base" });
+    warmd.job("check", &stale);
+    let job = warmd.job("check", &stale);
+    assert_eq!(
+        (job["result"]["rebased_from"].clone(), job["result"]["session_reused"].clone()),
+        (json!(gone), json!(true)),
+        "{job:#}"
+    );
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
     let fmt = job["result"]["jobs"].as_array().unwrap().iter().find(|job| job["name"] == "fmt").unwrap().clone();
     assert_eq!(fmt["new"], json!([]), "{job:#}");

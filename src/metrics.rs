@@ -104,7 +104,6 @@ pub(crate) async fn with_commands<F: Future>(future: F) -> F::Output {
 
 pub(crate) fn note_command(cmd: &str) {
     let short = cmd.chars().take(COMMAND_CHARS).collect::<String>();
-    if COMMANDS.try_with(|commands| commands.borrow_mut().push(short)).is_err() {
-        eprintln!("warmd: command outside a timed job: {}", cmd.lines().next().unwrap_or_default());
-    }
+    // Commands outside a job (the main poll's ls-remote) have no timeline to join.
+    if let Err(_outside) = COMMANDS.try_with(|commands| commands.borrow_mut().push(short)) {}
 }

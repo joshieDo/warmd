@@ -88,7 +88,7 @@ impl Repo {
     ) -> anyhow::Result<Self> {
         let gens_dir = state_dir.join(&name).join("gens");
         let jobs_dir = state_dir.join(&name).join("jobs");
-        remove_tree(&jobs_dir).await?;
+        let sessions = keep_sessions(&jobs_dir).await?;
         fs::create_dir_all(&jobs_dir)?;
         fs::create_dir_all(&gens_dir)?;
         let gens = adopt(&gens_dir)?;
@@ -120,7 +120,7 @@ impl Repo {
             gens: Mutex::new(gens),
             status: Mutex::new(status),
             building: tokio::sync::Mutex::new(()),
-            sessions: Mutex::default(),
+            sessions: Mutex::new(sessions),
             session_views: Mutex::default(),
             cache_bytes: AtomicU64::new(0),
         })
@@ -178,7 +178,7 @@ impl Repo {
         }
         views.sort_by_key(|view| Reverse(view.bytes));
         *self.session_views.lock().unwrap_or_else(PoisonError::into_inner) = views;
-        let cache = self.gens_dir.with_file_name("cache");
+        let cache = self.gens_dir.with_file_name("cache").join("upper");
         if symlink_metadata(&cache).await.is_ok() {
             self.cache_bytes.store(dir_bytes(&cache).await?, Ordering::Relaxed);
         }
@@ -518,6 +518,39 @@ pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
         .next()
         .context("du printed nothing")?
         .parse()?)
+}
+
+/// Clears a repo's jobs dir after a restart but keeps its sessions (a branch's warm build), so a deploy costs no warmth.
+async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    let mut kept = HashMap::new();
+    if symlink_metadata(jobs_dir).await.is_err() {
+        return Ok(kept);
+    }
+    for entry in fs::read_dir(jobs_dir)? {
+        let path = entry?.path();
+        if path.file_name() != Some(OsStr::new("sessions")) {
+            remove_tree(&path).await?;
+        }
+    }
+    let sessions = jobs_dir.join("sessions");
+    if symlink_metadata(&sessions).await.is_err() {
+        return Ok(kept);
+    }
+    for entry in fs::read_dir(sessions)? {
+        let dir = entry?.path();
+        match read_to_string(dir.join("meta.json"))
+            .await
+            .ok()
+            .and_then(|text| from_str::<Value>(&text).ok())
+            .and_then(|meta| meta["session"].as_str().map(str::to_owned))
+        {
+            Some(name) => {
+                kept.insert(name, Arc::default());
+            }
+            None => remove_tree(&dir).await?,
+        }
+    }
+    Ok(kept)
 }
 
 pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
