@@ -379,6 +379,8 @@ impl Repo {
         self.set_status(State::Refreshing, &current.sha, None, Vec::new());
         let mut clock = Clock::start();
         let cache = self.gens_dir.with_file_name("cache");
+        fs::create_dir_all(cache.join("upper"))?;
+        fs::create_dir_all(cache.join("work"))?;
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &current.dir, cache: &cache } };
         let cfg = self.cfg();
         let mut baseline = current.baseline.clone();
