@@ -309,10 +309,29 @@ fn checks_patches_against_warm_generations() {
     let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
     assert_eq!(job["result"]["jobs"][0]["name"], "extra", "{job:#}");
 
+    // A job that fails on main itself is skipped by checks and reported, without failing main's build.
+    let repos = fs::read_to_string(warmd.root.join("repos.toml")).unwrap();
+    fs::write(
+        warmd.root.join("repos.toml"),
+        repos.replacen("jobs = [", "jobs = [\n  { name = 'broken', cmd = 'echo nope >&2; exit 3' },", 1),
+    )
+    .unwrap();
+    sh(&warmd.root, &format!("kill -HUP {}", warmd.child.id()));
+    sleep(Duration::from_secs(1));
+    sh(
+        &warmd.root.join("demo"),
+        "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m next && git push -q ../demo.git main",
+    );
+    let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": comment }));
+    assert_eq!(job["result"]["ran_on"], warmd.head(), "{job:#}");
+    assert_eq!(job["result"]["broken_on_main"], json!(["broken"]), "{job:#}");
+    assert!(!names(&job["result"]["jobs"]).contains(&"broken"), "{job:#}");
+    assert_eq!(job["result"]["ok"], true, "{job:#}");
+
     let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
     assert!(!stats["machine"]["cpu_model"].as_str().unwrap().is_empty(), "{stats:#}");
-    assert_eq!(stats["repos"][0]["view"]["gens"].as_array().unwrap().len(), 2, "{stats:#}");
+    assert_eq!(stats["repos"][0]["view"]["gens"].as_array().unwrap().len(), 3, "{stats:#}");
     assert!(stats["repos"][0]["view"]["gens"][0]["expires_in_secs"].is_u64(), "{stats:#}");
     assert!(stats["repos"][0]["last_build"]["total_secs"].is_f64(), "{stats:#}");
     assert!(!stats["recent"].as_array().unwrap().is_empty(), "{stats:#}");

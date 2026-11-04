@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Context as _, bail, ensure};
+use anyhow::{Context as _, bail};
 use serde::Serialize;
 use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
@@ -36,6 +36,8 @@ use crate::{
 const SESSION_IDLE: Duration = Duration::from_mins(30);
 
 pub(crate) type Baseline = BTreeMap<String, Vec<Diag>>;
+
+pub(crate) type Broken = BTreeMap<String, String>;
 
 type Parts = BTreeMap<&'static str, u64>;
 
@@ -397,8 +399,12 @@ impl Repo {
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &tmp, cache: &cache } };
         let cfg = self.cfg();
         let mut baseline = Baseline::new();
+        let mut broken = Broken::new();
         lanes::run(sandbox, cfg.jobs.iter().map(|job| (job, job.main_cmd())).collect(), clock, |job, out, found| {
-            ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
+            if !out.ok() && found.is_empty() {
+                broken.insert(job.name.clone(), out.tail());
+                return Ok(());
+            }
             stats.insert(
                 job.name.clone(),
                 json!({ "rebuilt": diag::rebuilt(&out.stdout), "cpu_secs": out.cpu_secs, "hits": found.len() }),
@@ -407,13 +413,22 @@ impl Repo {
             Ok(())
         })
         .await?;
+        // One job broken on main (a lint the installed slapslop lacks, say) leaves the others' baseline usable:
+        // checks skip it and say so. Only a main where every job broke fails.
+        if baseline.is_empty()
+            && let Some((name, tail)) = broken.iter().next()
+        {
+            bail!("{name} failed on {sha}: {tail}");
+        }
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
+        write(self.gens_dir.join(format!("{sha}.broken.json")), to_vec(&broken)?).await?;
         clock.mark("save");
         Ok(Gen {
             sha: sha.to_owned(),
             dir,
             baseline,
+            broken,
             born: SystemTime::now(),
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),
@@ -441,6 +456,10 @@ impl Repo {
         }
         for sha in doomed {
             remove_file(self.gens_dir.join(format!("{sha}.json"))).await?;
+            let broken = self.gens_dir.join(format!("{sha}.broken.json"));
+            if broken.exists() {
+                remove_file(broken).await?;
+            }
             remove_tree(&self.gens_dir.join(sha)).await?;
         }
         Ok(())
@@ -464,6 +483,8 @@ pub(crate) struct Gen {
     sha: String,
     dir: PathBuf,
     baseline: Baseline,
+    /// Jobs that failed on this main without findings, with their output's tail.
+    broken: Broken,
     born: SystemTime,
     bytes: AtomicU64,
     own_bytes: AtomicU64,
@@ -482,6 +503,10 @@ impl Gen {
 
     pub(crate) fn baseline(&self, job: &str) -> &[Diag] {
         self.baseline.get(job).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) const fn broken(&self) -> &Broken {
+        &self.broken
     }
 
     pub(crate) const fn hits(&self) -> &Baseline {
@@ -675,11 +700,14 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
             continue;
         }
         let baseline = from_slice(&fs::read(&path)?)?;
+        let broken_file = gens_dir.join(format!("{sha}.broken.json"));
+        let broken = if broken_file.exists() { from_slice(&fs::read(&broken_file)?)? } else { Broken::new() };
         let born = fs::metadata(&path)?.modified()?;
         gens.push(Arc::new(Gen {
             sha: sha.to_owned(),
             dir,
             baseline,
+            broken,
             born,
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),

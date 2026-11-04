@@ -126,6 +126,8 @@ pub(crate) struct Report {
     main_moved: bool,
     jobs: Vec<JobResult>,
     not_run: Vec<String>,
+    /// Jobs skipped because they fail on main itself: nothing a patch can fix, so they don't decide `ok`.
+    broken_on_main: Vec<String>,
     full: Option<FullReport>,
     fix_patch: Option<String>,
 }
@@ -149,6 +151,11 @@ impl Report {
             .as_ref()
             .filter(|full| !full.hits.is_empty())
             .map_or_else(String::new, |full| format!(" (full: {} advisory)", full.hits.len()));
+        let full = if self.broken_on_main.is_empty() {
+            full
+        } else {
+            format!("{full} ({} broken on main, skipped)", self.broken_on_main.join(", "))
+        };
         if self.ok && !self.not_run.is_empty() {
             return format!("ok (partial: {} not run){full}", self.not_run.join(", "));
         }
@@ -524,6 +531,7 @@ async fn check(
     }) {
         if (job.bins_only && !scope.whole && !scope.bins_touched)
             || (job.benches_only && !scope.whole && !scope.benches_touched)
+            || generation.broken().contains_key(&job.name)
         {
             continue;
         }
@@ -616,6 +624,7 @@ async fn check(
         main_moved,
         jobs,
         not_run,
+        broken_on_main: generation.broken().keys().cloned().collect(),
         full,
         fix_patch,
     }))
