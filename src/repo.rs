@@ -27,6 +27,7 @@ use tokio::{
 use crate::{
     config::{Job, RepoCfg},
     diag::{self, Diag},
+    lanes,
     metrics::{self, Clock, Phase},
     sandbox::{Sandbox, Tree},
     stats::now_secs,
@@ -375,18 +376,18 @@ impl Repo {
         fs::create_dir_all(cache.join("upper"))?;
         fs::create_dir_all(cache.join("work"))?;
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &tmp, cache: &cache } };
+        let cfg = self.cfg();
         let mut baseline = Baseline::new();
-        for job in self.cfg().jobs.clone() {
-            let (out, found) =
-                sandbox.diagnose(&job, &job.render(job.on_main.as_ref().unwrap_or(&job.cmd), None)).await?;
+        lanes::run(sandbox, cfg.jobs.iter().map(|job| (job, job.main_cmd())).collect(), clock, |job, out, found| {
             ensure!(out.ok() || !found.is_empty(), "{} failed on {sha}: {}", job.name, out.tail());
-            clock.mark(format!("job:{}", job.name));
             stats.insert(
                 job.name.clone(),
                 json!({ "rebuilt": diag::rebuilt(&out.stdout), "cpu_secs": out.cpu_secs, "hits": found.len() }),
             );
-            baseline.insert(job.name, found);
-        }
+            baseline.insert(job.name.clone(), found);
+            Ok(())
+        })
+        .await?;
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         clock.mark("save");

@@ -164,10 +164,15 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(report["ok"], false);
     assert_eq!(report["ok_precise"], false);
     assert_eq!(report["main_moved"], false);
-    assert_eq!(names(&report["jobs"]), ["clippy", "fmt", "slapslop"]);
-    assert!(!names(&report["jobs"]).contains(&"bins"), "a lib-only patch skips bins_only jobs");
-    assert_eq!(codes(&report["jobs"][0]["new"]), ["clippy::ptr_arg"]);
-    let slapslop = report["jobs"][2]["new"].as_array().unwrap();
+    // Lanes run side by side, so jobs come in the order they finished.
+    let mut ran = names(&report["jobs"]);
+    ran.sort_unstable();
+    assert_eq!(ran, ["clippy", "fmt", "slapslop"]);
+    let lanes = job["phases"].as_array().unwrap().iter().filter_map(|phase| phase["lane"].as_str()).collect::<Vec<_>>();
+    assert!(["clippy", "fmt", "slapslop"].iter().all(|lane| lanes.contains(lane)), "{lanes:?}");
+    let by_name = |name: &str| report["jobs"].as_array().unwrap().iter().find(|job| job["name"] == name).unwrap();
+    assert_eq!(codes(&by_name("clippy")["new"]), ["clippy::ptr_arg"], "{job:#}");
+    let slapslop = by_name("slapslop")["new"].as_array().unwrap();
     assert!(slapslop.iter().all(|hit| hit["line"].as_u64() >= Some(4)), "{slapslop:#?}");
     assert!(slapslop.iter().any(|hit| hit["hazy"] == true), "{slapslop:#?}");
     let full = &full_job["result"]["full"];

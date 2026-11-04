@@ -44,7 +44,7 @@ code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; 
 tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decoration: underline; } tr.click:hover td { background: var(--fill); }
 #modal { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; }
 #modal[hidden] { display: none; }
-.sheet { width: 80vw; height: 80vh; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; overflow: auto; }
+.sheet { width: 92vw; max-height: 94vh; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 22px; overflow: auto; }
 .sheet header { margin-bottom: 16px; }
 .sheet button { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; }
 .tree, .tree ul { list-style: none; margin: 0; padding-left: 18px; }
@@ -54,7 +54,7 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .tree ul li::after { content: ""; position: absolute; left: 0; top: 13px; width: 10px; border-top: 1px solid var(--line); }
 .node { font-weight: 500; }
 .parts { margin: 4px 0 0; font-size: 12px; }
-.detail section { margin-bottom: 18px; } .kv { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
+.detail section { margin-bottom: 12px; } .detail .cols { display: grid; grid-template-columns: minmax(280px, 1fr) 2fr; gap: 28px; align-items: start; } .detail .cols table { margin-top: 0; } .kv { display: grid; grid-template-columns: 150px 1fr; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; } .phase { display: grid; grid-template-columns: 180px 1fr 60px; gap: 12px; align-items: center; padding: 3px 0; } .phase .bar { margin-top: 0; }
 .tl { margin: 4px 0 10px; } .tl-row { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: center; margin: 6px 0; } .tl-name { font-size: 11px; color: var(--muted); text-align: right; text-transform: uppercase; letter-spacing: .04em; } .tl-track { position: relative; height: 26px; background: var(--fill); border-radius: 6px; overflow: hidden; } .tl-seg { position: absolute; top: 3px; bottom: 3px; margin-left: 1px; border-radius: 4px; display: flex; align-items: center; overflow: hidden; } .tl-seg span { padding: 0 8px; font-size: 11px; font-weight: 500; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .tl-ticks { position: relative; height: 14px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); } .tl-ticks span { position: absolute; top: 2px; transform: translateX(-50%); } .tl-ticks span:first-child { transform: none; } .tl-ticks span:last-child { transform: translateX(-100%); } .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 16px 82px; font-size: 12px; color: var(--muted); } .leg i, .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; } table.phases { table-layout: fixed; } table.phases th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; } .ph-name { width: 200px; font-weight: 500; } .ph-job { margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--muted); } .ph-dur { width: 64px; text-align: right; font-variant-numeric: tabular-nums; } .ph-share { width: 120px; } .share { height: 6px; background: var(--fill); border-radius: 3px; overflow: hidden; } .share div { height: 100%; border-radius: 3px; } .ph-cmd code { display: block; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); } .ph-cmd details { margin-top: 4px; } .ph-cmd summary { font-size: 11px; color: var(--muted); cursor: pointer; } .ph-cmd pre { margin: 6px 0 0; padding: 8px 10px; background: var(--fill); border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 160px; overflow: auto; }
 .stack { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: rgba(127,127,127,.15); margin: 4px 0 8px; }
 .stack span { display: block; height: 100%; border-right: 1px solid rgba(0,0,0,.25); }
@@ -138,12 +138,12 @@ function timelineHtml(jobs) {
     lane.jobs.push(j); lane.end = j.start + j.total;
   }
   const pct = x => (x * 100 / span).toFixed(3) + "%";
-  const rows = lanes.map(l => '<div class="tl-row"><div class="tl-name">' + esc(l.jobs.map(j => j.label).join(" · ")) + '</div><div class="tl-track">' +
-    l.jobs.map(j => j.phases.filter(p => p.secs > 0).map(p => {
+  const rows = lanes.flatMap(l => [...new Set(l.jobs.flatMap(j => j.phases.map(p => p.lane || "")))].sort((a, b) => (a !== "") - (b !== "")).map(name => '<div class="tl-row"><div class="tl-name">' + esc(name || l.jobs.map(j => j.label).join(" · ")) + '</div><div class="tl-track">' +
+    l.jobs.map(j => j.phases.filter(p => p.secs > 0 && (p.lane || "") === name).map(p => {
       const w = p.secs / span;
       return '<div class="tl-seg" title="' + esc(phaseTitle(p.name) + " · " + dur(p.secs)) + '" style="left:' + pct(j.start + p.start_secs - t0) + ';width:calc(' + pct(p.secs) + ' - 2px);background:' + phaseColor(p.name) + '">' +
         (w > 0.09 ? '<span>' + esc(phaseTitle(p.name)) + '</span>' : '') + '</div>';
-    }).join("")).join("") + '</div></div>').join("");
+    }).join("")).join("") + '</div></div>')).join("");
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => '<span style="left:' + (f * 100) + '%">' + dur(span * f) + '</span>').join("");
   const used = new Set(jobs.flatMap(j => j.phases.filter(p => p.secs > 0).map(p => phaseKind(p.name).key)));
   const legend = PHASE_KINDS.filter(k => used.has(k.key)).map(k => '<span class="leg"><i style="background:' + k.color + '"></i>' + k.label + '</span>').join("");
@@ -159,20 +159,22 @@ function timelineHtml(jobs) {
       '<td class="ph-cmd">' + (main ? '<code title="' + esc(cmds.join("\n\n")) + '">' + esc(main) + '</code>' + (more ? '<details><summary>' + cmds.length + (cmds.length === 1 ? ' command' : ' commands') + '</summary>' + cmds.map(c => '<pre><code>' + esc(c) + '</code></pre>').join("") + '</details>' : '') : '<span class="muted">internal</span>') + '</td>' +
     '</tr>';
   })).join("");
-  return '<div class="tl">' + rows + '<div class="tl-row"><div class="tl-name"></div><div class="tl-ticks">' + ticks + '</div></div></div>' +
-    '<div class="legend">' + legend + '</div>' +
-    '<table class="phases"><thead><tr><th>Phase</th><th class="ph-dur">Time</th><th class="ph-share">Share</th><th>Command</th></tr></thead><tbody>' + rowsTable + '</tbody></table>';
+  return { chart: '<div class="tl">' + rows + '<div class="tl-row"><div class="tl-name"></div><div class="tl-ticks">' + ticks + '</div></div></div>' +
+    '<div class="legend">' + legend + '</div>', table:
+    '<table class="phases"><thead><tr><th>Phase</th><th class="ph-dur">Time</th><th class="ph-share">Share</th><th>Command</th></tr></thead><tbody>' + rowsTable + '</tbody></table>' };
 }
 function detailHtml(head, f, req, timeline) {
   return '<div class="detail">' +
+    (timeline ? '<section><h2>Timeline</h2>' + timeline.chart + '</section>' : '') +
+    '<div class="cols"><div>' +
     '<section><h2>Job</h2>' + head + '</section>' +
     '<section><h2>Request</h2>' +
       kv("Session", esc(req.session || "")) + kv("Full set", yes(req.full || req.full_only)) + kv("Only", chips(req.only)) + kv("Skip", chips(req.skip)) +
       kv("Args", argsHtml(req.args)) + kv("Fix patch", yes(req.fix)) + kv("Own slapslop baseline", yes(req.slapslop_baseline)) +
       kv("Patch", req.patch_lines != null ? req.patch_files + " files, " + req.patch_lines + " lines" : "") +
       (Object.keys(req).length ? "" : '<div class="muted">Not recorded for jobs before this change.</div>') +
-    '</section>' +
-    (timeline ? '<section><h2>Timeline</h2>' + timeline + '</section>' : '') +
+    '</section></div>' +
+    '<div>' + (timeline ? '<section><h2>Phases</h2>' + timeline.table + '</section>' : '') + '</div></div>' +
   '</div>';
 }
 function liveDetail(i) {

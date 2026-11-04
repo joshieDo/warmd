@@ -27,6 +27,9 @@ pub(crate) struct Phase {
     start_secs: f64,
     secs: f64,
     commands: Vec<String>,
+    /// The lane of a job that ran beside others; none for a step of the run itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane: Option<String>,
 }
 
 #[derive(Debug)]
@@ -44,14 +47,28 @@ impl Clock {
 
     pub(crate) fn mark(&mut self, name: impl Into<String>) {
         let now = Instant::now();
-        let commands = COMMANDS.try_with(RefCell::take).unwrap_or_default();
-        self.phases.push(Phase {
-            name: name.into(),
-            start_secs: self.total_secs(),
-            secs: now.duration_since(self.last).as_secs_f64(),
-            commands,
-        });
+        self.push(name.into(), self.last, now, take_commands(), None);
         self.last = now;
+    }
+
+    /// A phase that ran from `start` to `end` in `lane`, beside others.
+    pub(crate) fn span(&mut self, name: String, start: Instant, end: Instant, commands: Vec<String>, lane: &str) {
+        self.push(name, start, end, commands, Some(lane.to_owned()));
+    }
+
+    fn push(&mut self, name: String, start: Instant, end: Instant, commands: Vec<String>, lane: Option<String>) {
+        self.phases.push(Phase {
+            name,
+            start_secs: start.duration_since(self.started).as_secs_f64(),
+            secs: end.duration_since(start).as_secs_f64(),
+            commands,
+            lane,
+        });
+    }
+
+    /// Starts the next marked phase now, after phases added with `span`.
+    pub(crate) fn catch_up(&mut self) {
+        self.last = Instant::now();
     }
 
     fn total_secs(&self) -> f64 {
@@ -100,6 +117,11 @@ async fn prune(file: &Path, now: u64) -> anyhow::Result<()> {
 
 pub(crate) async fn with_commands<F: Future>(future: F) -> F::Output {
     COMMANDS.scope(RefCell::new(Vec::new()), future).await
+}
+
+/// The commands noted since the last take, in this task's scope.
+fn take_commands() -> Vec<String> {
+    COMMANDS.try_with(RefCell::take).unwrap_or_default()
 }
 
 pub(crate) fn note_command(cmd: &str) {

@@ -1,12 +1,18 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
-use anyhow::Context as _;
-use tokio::{fs::create_dir_all, io::AsyncWriteExt as _, process::Command, time::sleep};
+use anyhow::{Context as _, ensure};
+use tokio::{
+    fs::create_dir_all,
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
+    process::{Child, Command},
+    time::sleep,
+};
+use uuid::Uuid;
 
 use crate::{
     config::Job,
@@ -21,6 +27,12 @@ const MOUNT_ATTEMPTS: u32 = 10;
 const MOUNT_RETRY: Duration = Duration::from_millis(50);
 
 const SLAPSLOP_CACHE: &str = "target/slapslop";
+
+/// Where a lanes run's results directory is bound in the sandbox.
+const RESULTS: &str = "/tmp/warmd-results";
+
+/// The line a lanes run prints when a job finished, before the job's index.
+const DONE_MARK: &str = "warmd-done:";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sandbox<'a> {
@@ -50,6 +62,22 @@ impl Sandbox<'_> {
     }
 
     async fn run_once(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
+        let mut child = self.spawn(cmd, None, stdin.is_some()).await?;
+        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            pipe.write_all(text.as_bytes()).await?;
+        }
+        let out = child.wait_with_output().await?;
+        Ok(Output {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            cpu_secs: None,
+        })
+    }
+
+    /// Starts bwrap running `cmd` in the tree, with `results` (a host directory) bound at [`RESULTS`] when given,
+    /// stdout and stderr piped, and stdin piped when `stdin`.
+    async fn spawn(self, cmd: &str, results: Option<&Path>, stdin: bool) -> anyhow::Result<Child> {
         let home = env::var_os("HOME").map(PathBuf::from).context("HOME is unset")?;
         let cargo_home = env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
         let rustup_home = env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
@@ -91,29 +119,72 @@ impl Sandbox<'_> {
             create_dir_all(&remote).await?;
             bwrap.arg("--bind").arg(&remote).arg(&remote).arg("--setenv").arg("SLAPSLOP_REMOTE_CACHE").arg(&remote);
         }
-        bwrap.args(["--chdir", &work, "sh", "-c", cmd]);
-        bwrap.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
-        bwrap.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-        let mut child = bwrap.spawn().context("starting bwrap")?;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            pipe.write_all(text.as_bytes()).await?;
+        if let Some(dir) = results {
+            bwrap.arg("--bind").arg(dir).arg(RESULTS);
         }
-        let out = child.wait_with_output().await?;
-        Ok(Output {
-            code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            cpu_secs: None,
-        })
+        bwrap.args(["--chdir", &work, "sh", "-c", cmd]);
+        bwrap.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
+        bwrap.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        bwrap.spawn().context("starting bwrap")
     }
 
-    pub(crate) async fn diagnose(self, job: &Job, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
-        if !job.slapslop {
-            let out = self.run_described(cmd, &timed(cmd), None).await?.with_cpu();
-            let found = diag::parse(&out.stdout);
-            return Ok((out, found));
+    /// Runs the lanes in one sandbox (one overlay mount: two mounts of a layer would not see each other's writes):
+    /// each lane's jobs one after another, the lanes side by side. Calls `done` with each job and its output and
+    /// findings as it finishes.
+    pub(crate) async fn diagnose_lanes<'job>(
+        self,
+        lanes: &[Vec<LaneJob<'job>>],
+        mut done: impl FnMut(&LaneJob<'job>, Output, Vec<Diag>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let dir = env::temp_dir().join(format!("warmd-lanes-{}", Uuid::new_v4()));
+        create_dir_all(&dir).await?;
+        let result = async {
+            for attempt in 1..=MOUNT_ATTEMPTS {
+                let mut child = self.spawn(&lanes_script(lanes), Some(&dir), false).await?;
+                let mut lines = BufReader::new(child.stdout.take().context("bwrap stdout")?).lines();
+                let mut finished = 0;
+                while let Some(line) = lines.next_line().await? {
+                    let Some(index) = line.strip_prefix(DONE_MARK).and_then(|index| index.parse::<usize>().ok()) else {
+                        continue;
+                    };
+                    let job =
+                        lanes.iter().flatten().find(|job| job.index == index).context("an unknown job finished")?;
+                    let out = Output {
+                        code: result(&dir, index, "code")?.trim().parse().ok(),
+                        stdout: result(&dir, index, "out")?,
+                        stderr: result(&dir, index, "err")?,
+                        cpu_secs: None,
+                    }
+                    .with_cpu();
+                    let found = if job.job.slapslop {
+                        diag::parse(&result(&dir, index, "hits")?)
+                    } else {
+                        diag::parse(&out.stdout)
+                    };
+                    done(job, out, found)?;
+                    finished += 1;
+                }
+                let status = child.wait().await?;
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    pipe.read_to_string(&mut stderr).await?;
+                }
+                if finished == 0 && stderr.starts_with("bwrap: Can't make overlay mount") && attempt < MOUNT_ATTEMPTS {
+                    sleep(MOUNT_RETRY * attempt).await;
+                    continue;
+                }
+                ensure!(
+                    finished == lanes.iter().map(Vec::len).sum::<usize>(),
+                    "the jobs' sandbox stopped early ({status}): {}",
+                    stderr.trim()
+                );
+                return Ok(());
+            }
+            unreachable!("the last attempt returns")
         }
-        self.slapslop(cmd).await
+        .await;
+        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        result
     }
 
     pub(crate) async fn slapslop(self, cmd: &str) -> anyhow::Result<(Output, Vec<Diag>)> {
@@ -128,6 +199,43 @@ impl Sandbox<'_> {
             ),
         ))
     }
+}
+
+/// A job of a lanes run: its index in the plan, the job and the command it runs.
+#[derive(Debug)]
+pub(crate) struct LaneJob<'job> {
+    pub(crate) index: usize,
+    pub(crate) job: &'job Job,
+    pub(crate) cmd: String,
+}
+
+/// One file a job of a lanes run wrote to its results directory.
+fn result(dir: &Path, index: usize, ext: &str) -> anyhow::Result<String> {
+    let file = dir.join(format!("{index}.{ext}"));
+    fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
+}
+
+/// The script of a lanes run: a background subshell per lane running its jobs in order, each job's stdout, stderr,
+/// exit status (and slapslop's hits) written to [`RESULTS`], then a [`DONE_MARK`] line with its index.
+fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
+    let mut script = String::new();
+    for lane in lanes {
+        script.push_str("(\n");
+        for LaneJob { index, job, cmd } in lane {
+            let at = format!("{RESULTS}/{index}");
+            if job.slapslop {
+                script.push_str(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl\n"));
+            }
+            script.push_str(&format!("( {} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
+            if job.slapslop {
+                script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
+            }
+            script.push_str(&format!("echo {DONE_MARK}{index}\n"));
+        }
+        script.push_str(") &\n");
+    }
+    script.push_str("wait\n");
+    script
 }
 
 #[derive(Debug, Clone, Copy)]

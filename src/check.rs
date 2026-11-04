@@ -11,6 +11,7 @@ use tokio::fs::{create_dir_all, read_to_string, write};
 use crate::{
     config::{ArgsOverride, FULL_CLIPPY, Profile, Step},
     diag::{self, Diag},
+    lanes,
     metrics::{self, Clock, Phase},
     repo::{self, Repo},
     sandbox::{self, Sandbox, Tree},
@@ -531,35 +532,52 @@ async fn check(
         };
         planned.push((job, template));
     }
-    planned.sort_by_key(|(job, _)| job.slapslop);
+    let order = planned.iter().map(|(job, _)| job.name.clone()).collect::<Vec<_>>();
+    let mut pending = order.clone();
     let mut jobs = Vec::with_capacity(planned.len());
-    for (index, (job, template)) in planned.iter().enumerate() {
-        progress(
-            json!({ "partial": jobs, "pending": planned[index..].iter().map(|(job, _)| &job.name).collect::<Vec<_>>() }),
-        );
-        let custom = req
-            .args
-            .get(&job.name)
-            .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
-        let (out, mut found) = sandbox.diagnose(job, &job.render(template, custom)).await?;
-        let output = (!out.ok() && found.is_empty()).then(|| out.tail());
-        let new = if custom.is_some() {
-            found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
-            found
-        } else {
-            diag::new_only(found, generation.baseline(&job.name))
-        };
-        jobs.push(JobResult {
-            name: job.name.clone(),
-            exit: out.code,
-            new,
-            output,
-            custom_args: custom.is_some(),
-            rebuilt: diag::rebuilt(&out.stdout),
-            cpu_secs: out.cpu_secs,
-        });
-        clock.mark(format!("job:{}", job.name));
-    }
+    progress(json!({ "partial": jobs, "pending": pending }));
+    lanes::run(
+        sandbox,
+        planned
+            .into_iter()
+            .map(|(job, template)| {
+                let custom = req
+                    .args
+                    .get(&job.name)
+                    .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
+                (job, job.render(&template, custom))
+            })
+            .collect(),
+        clock,
+        |job, out, mut found| {
+            let custom = req
+                .args
+                .get(&job.name)
+                .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
+            let output = (!out.ok() && found.is_empty()).then(|| out.tail());
+            let new = if custom.is_some() {
+                found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
+                found
+            } else {
+                diag::new_only(found, generation.baseline(&job.name))
+            };
+            jobs.push(JobResult {
+                name: job.name.clone(),
+                exit: out.code,
+                new,
+                output,
+                custom_args: custom.is_some(),
+                rebuilt: diag::rebuilt(&out.stdout),
+                cpu_secs: out.cpu_secs,
+            });
+            pending.retain(|name| *name != job.name);
+            progress(json!({ "partial": jobs, "pending": pending }));
+            Ok(())
+        },
+    )
+    .await?;
+    // The report lists jobs as configured; progress listed them as they finished.
+    jobs.sort_by_key(|job| order.iter().position(|name| *name == job.name));
 
     let full = if req.full {
         let mut hits = Vec::new();

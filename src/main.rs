@@ -38,6 +38,7 @@ use crate::{
 mod check;
 mod config;
 mod diag;
+mod lanes;
 mod metrics;
 mod repo;
 mod sandbox;

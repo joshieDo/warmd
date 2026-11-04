@@ -63,6 +63,16 @@ pub(crate) struct Job {
 }
 
 impl Job {
+    /// What a main build runs: `on_main`, else `cmd`, rendered with the job's own args.
+    pub(crate) fn main_cmd(&self) -> String {
+        self.render(self.on_main.as_ref().unwrap_or(&self.cmd), None)
+    }
+
+    /// The lane the job runs in: slapslop, or its name up to the first `-` (`clippy-tests` runs with `clippy`).
+    pub(crate) fn lane(&self) -> &str {
+        if self.slapslop { "slapslop" } else { self.name.split_once('-').map_or(self.name.as_str(), |(head, _)| head) }
+    }
+
     pub(crate) fn render(&self, template: &str, args: Option<&ArgsOverride>) -> String {
         let args = args.map_or_else(
             || self.args.clone(),
