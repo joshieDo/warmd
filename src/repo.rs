@@ -261,6 +261,15 @@ impl Repo {
         self.gens().last().cloned()
     }
 
+    /// When `sha` is main's head but not built yet (its build may be running), builds it first, so a check on the newest
+    /// main runs on it instead of rebasing onto the build before (and starting its branch cold twice).
+    pub(crate) async fn catch_up_to(&self, sha: &str) -> anyhow::Result<()> {
+        if self.find(sha).is_none() && self.remote_head().await? == sha {
+            self.refresh(self.keep, false).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn find(&self, sha: &str) -> Option<Arc<Gen>> {
         self.gens().iter().find(|generation| generation.sha == sha).cloned()
     }

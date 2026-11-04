@@ -404,6 +404,10 @@ async fn check(
     {
         bail!("no job of {} answers to {key}", repo.name());
     }
+    if let Err(err) = repo.catch_up_to(&req.base.sha).await {
+        eprintln!("warmd: {}: building main {} for a check: {err:#}", repo.name(), req.base.sha);
+    }
+    clock.mark("wait_main");
     let current = repo.current().with_context(|| format!("{} has no generation yet", repo.name()))?;
     let (generation, rebased_from) = match repo.find(&req.base.sha) {
         Some(generation) => (generation, None),

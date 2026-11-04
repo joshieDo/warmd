@@ -1,5 +1,7 @@
 listen = "100.105.221.115:7878"
 state_dir = "state"
+# Older main builds stay this long, so a check on a base main just moved past still runs on it.
+keep_hours = 2
 
 [repos.tempo]
 url = "https://github.com/tempoxyz/tempo"

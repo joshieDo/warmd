@@ -256,6 +256,13 @@ fn checks_patches_against_warm_generations() {
         "sed -i 's/a + b/b + a/' src/lib.rs && printf 'pub fn ugly()->u32{1}\\n' >> src/lib.rs && git -c user.name=t -c user.email=t@t commit -qam swap",
     );
     sh(&warmd.root.join("demo"), "git push -q ../demo.git main");
+    // A check on main's new head, before the poll built it, builds it first and runs on it (no rebase).
+    let job = warmd.job("check", &json!({ "repo": "demo", "base": { "sha": warmd.head() }, "patch": "" }));
+    assert_eq!(
+        (job["result"]["ran_on"].clone(), job["result"]["rebased_from"].clone()),
+        (json!(warmd.head()), json!(null)),
+        "{job:#}"
+    );
     let job = warmd.job("repos/demo/refresh", &json!({}));
     assert_eq!(job["result"]["current"], warmd.head());
     assert_eq!(job["result"]["gens"].as_array().unwrap().len(), 2);

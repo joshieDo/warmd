@@ -124,7 +124,7 @@ const PHASE_KINDS = [
   { key: "slapslop", label: "slapslop", color: "#9b7bf0", test: n => /slapslop/.test(n) },
   { key: "fmt", label: "rustfmt", color: "#3fb27f", test: n => /fmt/.test(n) },
   { key: "git", label: "Git / copy", color: "#3aa7b8", test: n => /copy|fetch|clone|checkout|submodules|apply|commit/.test(n) },
-  { key: "wait", label: "Waiting (branch busy / no free slot)", color: "#e0a43a", test: n => /^queued$|^wait_branch$/.test(n) },
+  { key: "wait", label: "Waiting (main building / branch busy / no free slot)", color: "#e0a43a", test: n => /^queued$|^wait_branch$|^wait_main$/.test(n) },
   { key: "other", label: "Setup", color: "#8a8f98", test: () => true },
 ];
 const phaseKind = name => PHASE_KINDS.find(k => k.test(name));
