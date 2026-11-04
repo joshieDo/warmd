@@ -43,6 +43,13 @@ pub(crate) struct RepoCfg {
     pub(crate) clippy: String,
 }
 
+impl RepoCfg {
+    /// The slapslop jobs, each with what a main build runs.
+    pub(crate) fn slapslop_main_cmds(&self) -> Vec<(&Job, String)> {
+        self.jobs.iter().filter(|job| job.slapslop).map(|job| (job, job.main_cmd())).collect()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Job {

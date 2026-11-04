@@ -47,6 +47,7 @@ pub(crate) struct Repo {
     cfg: Mutex<Arc<RepoCfg>>,
     retired: AtomicBool,
     slots: Semaphore,
+    slot_count: u32,
     jobs_dir: PathBuf,
     gens_dir: PathBuf,
     metrics_file: PathBuf,
@@ -119,6 +120,7 @@ impl Repo {
             cfg: Mutex::new(Arc::new(cfg)),
             retired: AtomicBool::new(false),
             slots: Semaphore::new(usize::from(slots)),
+            slot_count: u32::from(slots),
             jobs_dir,
             gens_dir,
             metrics_file,
@@ -359,8 +361,68 @@ impl Repo {
                     return Err(err);
                 }
             }
+        } else if let Some(current) = self.current().filter(|current| current.sha == head) {
+            self.rescan(&current).await?;
         }
         self.prune(keep).await
+    }
+
+    /// Re-runs main's slapslop jobs with a newly installed slapslop, so checks compare against its hits, not the old
+    /// one's. Checks wait meanwhile (it holds every slot), and the branch layers go: their slapslop output is the old
+    /// tool's.
+    async fn rescan(&self, current: &Arc<Gen>) -> anyhow::Result<()> {
+        let Some(tool) = installed_slapslop().await.filter(|tool| current.tool.as_deref() != Some(tool.as_str()))
+        else {
+            return Ok(());
+        };
+        let _all = self.slots.acquire_many(self.slot_count).await?;
+        self.set_status(State::Refreshing, &current.sha, None, Vec::new());
+        let mut clock = Clock::start();
+        let cache = self.gens_dir.with_file_name("cache");
+        let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &current.dir, cache: &cache } };
+        let cfg = self.cfg();
+        let mut baseline = current.baseline.clone();
+        let mut broken = current.broken.clone();
+        let mut stats = BTreeMap::new();
+        let ran =
+            metrics::with_commands(lanes::run(sandbox, cfg.slapslop_main_cmds(), &mut clock, |job, out, found| {
+                broken.remove(&job.name);
+                if !out.ok() && found.is_empty() {
+                    broken.insert(job.name.clone(), out.tail());
+                }
+                stats.insert(
+                    job.name.clone(),
+                    json!({ "rebuilt": diag::rebuilt(&out.stdout), "cpu_secs": out.cpu_secs, "hits": found.len() }),
+                );
+                baseline.insert(job.name.clone(), found);
+                Ok(())
+            }))
+            .await;
+        let fields = json!({ "repo": self.name, "sha": current.sha, "ok": ran.is_ok(), "jobs": stats, "rescan": tool });
+        metrics::record(&self.metrics_file, "build", fields, &clock).await;
+        ran?;
+        let sha = &current.sha;
+        write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
+        write(self.gens_dir.join(format!("{sha}.broken.json")), to_vec(&broken)?).await?;
+        write(self.gens_dir.join(format!("{sha}.tool")), &tool).await?;
+        if let Some(generation) = self.gens().iter_mut().find(|generation| generation.sha == *sha) {
+            *generation = Arc::new(Gen {
+                sha: sha.clone(),
+                dir: current.dir.clone(),
+                baseline,
+                broken,
+                tool: Some(tool),
+                born: current.born,
+                bytes: AtomicU64::new(current.bytes.load(Ordering::Relaxed)),
+                own_bytes: AtomicU64::new(current.own_bytes.load(Ordering::Relaxed)),
+                parts: Mutex::new(current.parts.lock().unwrap_or_else(PoisonError::into_inner).clone()),
+                own_parts: Mutex::new(current.own_parts.lock().unwrap_or_else(PoisonError::into_inner).clone()),
+            });
+        }
+        remove_tree(&self.jobs_dir.join("sessions")).await?;
+        self.session_views.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.set_status(State::Ready, sha, None, clock.into_phases());
+        Ok(())
     }
 
     async fn remote_head(&self) -> anyhow::Result<String> {
@@ -423,12 +485,15 @@ impl Repo {
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         write(self.gens_dir.join(format!("{sha}.broken.json")), to_vec(&broken)?).await?;
+        let tool = installed_slapslop().await;
+        write(self.gens_dir.join(format!("{sha}.tool")), tool.clone().unwrap_or_default()).await?;
         clock.mark("save");
         Ok(Gen {
             sha: sha.to_owned(),
             dir,
             baseline,
             broken,
+            tool,
             born: SystemTime::now(),
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),
@@ -456,9 +521,11 @@ impl Repo {
         }
         for sha in doomed {
             remove_file(self.gens_dir.join(format!("{sha}.json"))).await?;
-            let broken = self.gens_dir.join(format!("{sha}.broken.json"));
-            if broken.exists() {
-                remove_file(broken).await?;
+            for extra in [format!("{sha}.broken.json"), format!("{sha}.tool")] {
+                let file = self.gens_dir.join(extra);
+                if file.exists() {
+                    remove_file(file).await?;
+                }
             }
             remove_tree(&self.gens_dir.join(sha)).await?;
         }
@@ -485,6 +552,8 @@ pub(crate) struct Gen {
     baseline: Baseline,
     /// Jobs that failed on this main without findings, with their output's tail.
     broken: Broken,
+    /// The slapslop that made the baseline (`cargo-slapslop --version`): another one rescans main.
+    tool: Option<String>,
     born: SystemTime,
     bytes: AtomicU64,
     own_bytes: AtomicU64,
@@ -625,6 +694,12 @@ fn session_key(name: &str) -> String {
     name.bytes().map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte) } else { '_' }).collect()
 }
 
+/// The installed slapslop's version line, none when it does not run.
+async fn installed_slapslop() -> Option<String> {
+    let out = Command::new("cargo-slapslop").arg("--version").output().await.ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|line| !line.is_empty())
+}
+
 pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     if symlink_metadata(path).await.is_err() {
         return Ok(());
@@ -702,12 +777,14 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
         let baseline = from_slice(&fs::read(&path)?)?;
         let broken_file = gens_dir.join(format!("{sha}.broken.json"));
         let broken = if broken_file.exists() { from_slice(&fs::read(&broken_file)?)? } else { Broken::new() };
+        let tool = fs::read_to_string(gens_dir.join(format!("{sha}.tool"))).ok().filter(|tool| !tool.is_empty());
         let born = fs::metadata(&path)?.modified()?;
         gens.push(Arc::new(Gen {
             sha: sha.to_owned(),
             dir,
             baseline,
             broken,
+            tool,
             born,
             bytes: AtomicU64::new(0),
             own_bytes: AtomicU64::new(0),
