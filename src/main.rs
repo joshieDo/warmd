@@ -241,7 +241,7 @@ async fn refresh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply
     app.set(id, Job::Running { progress: None });
     spawn(async move {
         let mut clock = Clock::start();
-        let result = repo.refresh(app.keep).await.map(|()| Done::Refresh(repo.view()));
+        let result = repo.refresh(app.keep, true).await.map(|()| Done::Refresh(repo.view()));
         clock.mark("refresh");
         app.finish(id, result, clock.into_phases());
     });

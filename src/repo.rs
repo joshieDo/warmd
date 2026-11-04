@@ -52,6 +52,9 @@ pub(crate) struct Repo {
     gens: Mutex<Vec<Arc<Gen>>>,
     status: Mutex<Status>,
     building: tokio::sync::Mutex<()>,
+    /// The main commit whose build last failed: the poll does not build it again until main moves or the config
+    /// is reloaded (a manual refresh still does).
+    failed_sha: Mutex<Option<String>>,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     session_views: Mutex<Vec<SessionView>>,
     cache_bytes: AtomicU64,
@@ -121,6 +124,7 @@ impl Repo {
             gens: Mutex::new(gens),
             status: Mutex::new(status),
             building: tokio::sync::Mutex::new(()),
+            failed_sha: Mutex::default(),
             sessions: Mutex::new(sessions),
             session_views: Mutex::default(),
             cache_bytes: AtomicU64::new(0),
@@ -137,6 +141,11 @@ impl Repo {
 
     pub(crate) fn set_cfg(&self, cfg: RepoCfg) {
         *self.cfg.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(cfg);
+        self.failed_sha.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+
+    fn failed_on(&self, sha: &str) -> bool {
+        self.failed_sha.lock().unwrap_or_else(PoisonError::into_inner).as_deref() == Some(sha)
     }
 
     pub(crate) fn retire(&self) {
@@ -312,10 +321,10 @@ impl Repo {
         lines.iter().skip(lines.len().saturating_sub(count)).filter_map(|line| from_str(line).ok()).collect()
     }
 
-    pub(crate) async fn refresh(&self, keep: Duration) -> anyhow::Result<()> {
+    pub(crate) async fn refresh(&self, keep: Duration, retry_failed: bool) -> anyhow::Result<()> {
         let _building = self.building.lock().await;
         let head = self.remote_head().await?;
-        if self.current().is_none_or(|current| current.sha != head) {
+        if self.current().is_none_or(|current| current.sha != head) && (retry_failed || !self.failed_on(&head)) {
             self.set_status(State::Refreshing, &head, None, Vec::new());
             let mut clock = Clock::start();
             let mut stats = BTreeMap::new();
@@ -334,6 +343,7 @@ impl Repo {
                     self.set_status(State::Ready, &head, None, phases);
                 }
                 Err(err) => {
+                    *self.failed_sha.lock().unwrap_or_else(PoisonError::into_inner) = Some(head.clone());
                     self.set_status(State::Failed, &head, Some(format!("{err:#}")), phases);
                     return Err(err);
                 }
@@ -523,7 +533,7 @@ struct Status {
 
 pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
     while !repo.retired.load(Ordering::Relaxed) {
-        if let Err(err) = repo.refresh(keep).await {
+        if let Err(err) = repo.refresh(keep, false).await {
             eprintln!("warmd: {}: {err:#}", repo.name);
         }
         if let Err(err) = repo.prune_sessions(SESSION_IDLE).await {
