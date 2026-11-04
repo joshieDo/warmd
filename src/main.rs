@@ -10,14 +10,14 @@ use std::{
 use anyhow::Context as _;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
     serve,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_value};
 use tokio::{
     net::TcpListener,
     process::Command,
@@ -38,6 +38,7 @@ use crate::{
 mod check;
 mod config;
 mod diag;
+mod hits_view;
 mod lanes;
 mod metrics;
 mod repo;
@@ -184,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/{name}", get(repo_view))
         .route("/repos/{name}/refresh", post(refresh))
         .route("/repos/{name}/hits", get(hits))
+        .route("/repos/{name}/hits/view", get(hits_view))
         .with_state(app);
     serve(TcpListener::bind(&config.listen).await.with_context(|| format!("binding {}", config.listen))?, router)
         .await?;
@@ -265,6 +267,18 @@ async fn hits(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<Va
     let current =
         app.repo(&name)?.current().ok_or_else(|| (StatusCode::NOT_FOUND, format!("{name} has no main build yet")))?;
     Ok(Json(json!({ "sha": current.sha(), "jobs": current.hits() })))
+}
+
+async fn hits_view(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Query(filter): Query<hits_view::Filter>,
+) -> Reply<Value> {
+    let current =
+        app.repo(&name)?.current().ok_or_else(|| (StatusCode::NOT_FOUND, format!("{name} has no main build yet")))?;
+    to_value(hits_view::view(current.sha(), current.hits(), &filter))
+        .map(Json)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 async fn page() -> Html<&'static str> {

@@ -15,6 +15,11 @@ pub(crate) struct Diag {
 }
 
 impl Diag {
+    /// The lint's code, or a placeholder for a message without one.
+    pub(crate) fn lint(&self) -> &str {
+        self.code.as_deref().unwrap_or("(no code)")
+    }
+
     fn key(&self) -> Key {
         Key { code: self.code.clone(), file: self.file.clone(), message: self.message.clone() }
     }

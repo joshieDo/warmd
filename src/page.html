@@ -63,6 +63,12 @@ tr.click { cursor: pointer; } a { color: inherit; } a:hover code { text-decorati
 .s-main { background: #3b82f6; } .s-main + .s-main { background: #60a5fa; } .s-main + .s-main + .s-main { background: #93c5fd; }
 .s-old { background: #9ca3af; } .s-sess { background: #f59e0b; } .s-cache { background: #10b981; }
 #modal-body h2 { margin-top: 18px; }
+.tabs { display: flex; gap: 4px; margin: -4px 0 14px; border-bottom: 1px solid var(--line); } .tabs button { padding: 6px 12px; border-bottom: 2px solid transparent; font-size: 13px; color: var(--muted); } .tabs button.on { color: var(--text); border-bottom-color: var(--text); }
+.hhead { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin-bottom: 8px; font-size: 12px; } .chip.hj, .chip.hc { cursor: pointer; } .chip.hj.on { background: var(--text); color: var(--surface); } .hcrumbs { margin-bottom: 8px; }
+.hcols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; } .hcols h2 { margin: 6px 0 6px; }
+.hb { display: grid; grid-template-columns: minmax(0, 46%) 1fr 52px; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 4px; cursor: pointer; font-size: 12px; } .hb:hover, .hb.on { background: var(--fill); } .hb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; } .hb-bar { height: 8px; } .hb-bar > span { display: block; height: 100%; background: rgba(155,123,240,.35); border-radius: 3px; overflow: hidden; } .hb-bar i { display: block; height: 100%; background: #9b7bf0; } .hb-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+pre.hit { margin: 6px 0; padding: 8px 10px; background: var(--fill); border-radius: 6px; font-size: 11.5px; white-space: pre-wrap; } pre.hit.hazy { opacity: .7; }
+
 #machine { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 #machine .card:first-child { grid-column: 1 / -1; }
 #repos td { padding: 6px 4px; vertical-align: top; } #repos .rsub { font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -210,7 +216,39 @@ function recentDetail(i) {
   $("modal-body").innerHTML = detailHtml(head, f, f.request || {}, jobs.some(x => x.phases.length) ? timelineHtml(jobs) : "");
   $("modal").hidden = false;
 }
+let treeTab = "disk", hitsState = { repo: null, filter: {}, data: null, loading: false };
+function hitsBars(list, key, active, max) {
+  if (!list.length) return '<div class="muted">none</div>';
+  return list.map(c => {
+    const on = active === c.name, w = Math.max(c.total * 100 / max, 0.6), hz = c.total ? c.hazy * 100 / c.total : 0;
+    return '<div class="hb' + (on ? ' on' : '') + '" data-hf="' + key + '" data-hv="' + esc(c.name) + '" title="' + esc(c.name) + ': ' + c.total + ' (' + c.hazy + ' hazy)">' +
+      '<span class="hb-name">' + esc(c.name || "(no file)") + '</span><span class="hb-bar"><span style="width:' + w.toFixed(2) + '%"><i style="width:' + (100 - hz).toFixed(1) + '%"></i></span></span><span class="hb-n">' + c.total.toLocaleString() + '</span></div>';
+  }).join("");
+}
+function hitsHtml(r) {
+  const d = hitsState.data, f = hitsState.filter;
+  if (!d) return '<div class="muted">' + (hitsState.loading ? "loading…" : "no main build yet") + '</div>';
+  const jobs = d.jobs.map(j => '<span class="chip hj' + (j.name === d.job ? ' on' : '') + '" data-hf="job" data-hv="' + esc(j.name) + '">' + esc(j.name) + ' <b>' + j.total.toLocaleString() + '</b></span>').join("");
+  const crumbs = ["lint", "dir", "file"].filter(k => f[k]).map(k => '<span class="chip hc" data-hf="' + k + '" data-hv="">' + k + ': ' + esc(f[k]) + ' ✕</span>').join("");
+  const maxOf = l => Math.max(1, ...l.map(c => c.total));
+  let body = '<div class="hcols"><div><h2>By lint</h2>' + hitsBars(d.lints, "lint", f.lint, maxOf(d.lints)) + '</div>' +
+    '<div><h2>By crate / dir</h2>' + hitsBars(d.dirs, "dir", f.dir, maxOf(d.dirs)) + '</div>' +
+    '<div><h2>Files' + (f.lint || f.dir ? '' : ' (pick a lint or dir to narrow)') + '</h2>' + hitsBars(d.files, "file", f.file, maxOf(d.files)) + '</div></div>';
+  if (f.file) body += '<h2>' + esc(f.file) + ' · ' + d.file_hits.total + ' hits' + (d.file_hits.total > d.hits.length ? ' (first ' + d.hits.length + ')' : '') + '</h2>' +
+    d.hits.map(h => '<pre class="hit' + (h.hazy ? ' hazy' : '') + '">' + esc(h.rendered.trimEnd()) + '</pre>').join("");
+  return '<div class="hhead">' + jobs + '<span class="muted">main ' + commitLink(r.name, d.sha, false) + ' · ' + d.shown.total.toLocaleString() + ' shown · solid = precise, light = hazy</span></div>' +
+    (crumbs ? '<div class="hcrumbs">' + crumbs + '</div>' : '') + body;
+}
+async function hitsLoad(r) {
+  const q = new URLSearchParams(Object.entries(hitsState.filter).filter(([, v]) => v)).toString();
+  hitsState.loading = true;
+  const res = await fetch("/repos/" + encodeURIComponent(r.name) + "/hits/view?" + q);
+  hitsState.data = res.ok ? await res.json() : null;
+  hitsState.loading = false;
+  if (open != null && last.repos[open].name === r.name && treeTab === "hits") tree(open);
+}
 function tree(i) {
+  if (open !== i) { treeTab = "disk"; }
   open = i;
   const r = last.repos[i], v = r.view, gens = [...v.gens].reverse(), main = gens[0], older = gens.slice(1);
   const sessions = v.sessions || [];
@@ -240,13 +278,25 @@ function tree(i) {
     return td(f.branch ? esc(f.branch) : f.base ? commit(f.base) : "–", esc(c.kind), dot(cls) + esc(res.slice(0, 50)), size(f.layer_bytes), dur(c.total_secs), ago(c.at));
   }), "none");
   $("modal-title").textContent = r.name + " · " + gb(total) + " on disk";
-  $("modal-body").innerHTML = stack + legend + mainSec + oldSec + sessSec + checkSec;
+  const tabs = '<div class="tabs"><button data-tab="disk"' + (treeTab === "disk" ? ' class="on"' : '') + '>Disk</button><button data-tab="hits"' + (treeTab === "hits" ? ' class="on"' : '') + '>Main hits</button></div>';
+  if (treeTab === "hits" && hitsState.repo !== r.name) { hitsState = { repo: r.name, filter: {}, data: null, loading: false }; hitsLoad(r); }
+  $("modal-body").innerHTML = tabs + (treeTab === "hits" ? hitsHtml(r) : stack + legend + mainSec + oldSec + sessSec + checkSec);
   $("modal").hidden = false;
 }
 function closeTree() { open = null; $("modal").hidden = true; }
 document.addEventListener("click", e => {
   const row = e.target.closest("tr.click");
   if (e.target.closest("a")) return;
+  const tab = e.target.closest("[data-tab]");
+  if (tab) { treeTab = tab.dataset.tab; tree(open); return; }
+  const hf = e.target.closest("[data-hf]");
+  if (hf) {
+    const k = hf.dataset.hf, v = hf.dataset.hv, f = hitsState.filter;
+    if (k === "job") hitsState.filter = { job: v };
+    else { f[k] = f[k] === v ? "" : v; if (k !== "file") f.file = ""; }
+    hitsLoad(last.repos[open]);
+    return;
+  }
   if (row && row.dataset.live != null) liveDetail(Number(row.dataset.live));
   else if (row && row.dataset.recent != null) recentDetail(Number(row.dataset.recent));
   else if (row) tree(Number(row.dataset.repo));
