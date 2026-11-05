@@ -38,7 +38,7 @@ git read-tree "$commit"
 
 const FULL_NOTICE: &str = "Advisory: the full set (slapslop --all-lints and slapslop's recommended clippy set) on your added lines. Fix what you reasonably can; hazy hits and deliberate patterns may stay. Only the CI jobs (ok / ok_precise) decide whether the change can merge.";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     repo: String,
@@ -113,6 +113,10 @@ impl Request {
 
     pub(crate) fn baseline_only(self) -> Self {
         Self { baseline_only: true, ..self }
+    }
+
+    pub(crate) const fn remote_ok(&self) -> bool {
+        !self.full_only
     }
 }
 
@@ -194,7 +198,7 @@ struct FullReport {
     hits: Vec<Diag>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Base {
     #[serde(rename = "ref")]

@@ -89,6 +89,7 @@ pre.hit { margin: 6px 0; padding: 8px 10px; background: var(--fill); border-radi
   <section class="card"><h2>Repos</h2><table><tbody id="repos"></tbody></table></section>
   </div>
   <div class="col">
+  <section class="card"><h2>Remotes</h2><div id="remotes"></div></section>
   <section class="card"><h2>Running now</h2><table><thead><tr><th>Since</th><th>Repo</th><th>Branch</th><th>Kind</th><th>State</th></tr></thead><tbody id="live"></tbody></table></section>
   <section class="card"><h2>Recent jobs</h2><table><thead><tr><th>When</th><th>Repo</th><th>Branch</th><th>Kind</th><th>Result</th><th>Total</th><th>Slowest phases</th></tr></thead><tbody id="jobs"></tbody></table></section>
   </div>
@@ -328,8 +329,10 @@ async function load() {
     return sha && repo && /^https:/.test(repo.url) ? '<a href="' + esc(repo.url) + '/commit/' + esc(sha) + '" target="_blank">' + label + '</a>' : label;
   };
   const liveRows = (s.building || []).map(b => '<tr><td class="muted">' + dur(Date.now() / 1000 - b.started) + '</td><td>' + esc(b.repo) + '</td><td>main <span class="muted">' + commitLink(b.repo, b.sha, false) + '</span></td><td>build</td><td>' + dot("refreshing") + 'building</td></tr>')
-    .concat((s.live || []).map((j, i) => '<tr class="click" data-live="' + i + '"><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + (j.branch ? esc(j.branch) : commitLink(j.repo, j.base, false)) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + '</td></tr>'));
+    .concat((s.live || []).map((j, i) => '<tr class="click" data-live="' + i + '"><td class="muted">' + dur(Date.now() / 1000 - j.started) + '</td><td>' + esc(j.repo) + '</td><td>' + (j.branch ? esc(j.branch) : commitLink(j.repo, j.base, false)) + '</td><td>' + esc(j.kind) + '</td><td>' + dot(j.running_since ? "refreshing" : "queued") + (j.running_since ? 'running ' + dur(Date.now() / 1000 - j.running_since) : 'queued') + (j.remote ? ' <span class="muted">on ' + esc(j.remote) + '</span>' : '') + '</td></tr>'));
   $("live").innerHTML = liveRows.join("") || '<tr><td colspan="5" class="muted">Nothing running</td></tr>';
+  const bal = s.balance || { remotes: [], pending: 0 };
+  $("remotes").innerHTML = (bal.remotes.length ? bal.remotes.map(r => dot(r.up ? "ready" : "failed") + esc(r.addr) + ' <span class="muted">' + (r.up ? (r.running + ' running, free for ' + (r.free_for.length ? r.free_for.map(esc).join(", ") : "nothing")) : 'down' + (r.error ? ': ' + esc(r.error) : '')) + '</span>').join(" · ") : '<span class="muted">none: every check runs on this machine</span>') + (bal.pending ? ' · <span class="muted">' + bal.pending + ' waiting for a free source</span>' : '');
   $("jobs").innerHTML = s.recent.map((j, i) => {
     const slow = [...j.phases].sort((a, b) => b.secs - a.secs).slice(0, 3).map(p => '<span class="chip">' + esc(p.name) + ' ' + dur(p.secs) + '</span>').join("");
     const res = String(j.fields.result ?? (j.kind === "build" ? (j.fields.ok ? "built" : "failed") : j.fields.ok ? "ok" : "failed"));

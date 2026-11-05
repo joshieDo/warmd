@@ -202,6 +202,14 @@ impl Repo {
         &self.jobs_dir
     }
 
+    pub(crate) fn free_slots(&self) -> usize {
+        self.slots.available_permits()
+    }
+
+    pub(crate) const fn slot_count(&self) -> u32 {
+        self.slot_count
+    }
+
     pub(crate) async fn slot(&self) -> anyhow::Result<SemaphorePermit<'_>> {
         Ok(self.slots.acquire().await?)
     }
@@ -652,7 +660,7 @@ pub(crate) async fn poll(repo: Arc<Repo>, every: Duration, keep: Duration) {
 }
 
 pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
-    Ok(checked_quiet(Command::new("du").arg("-sb").arg(path))
+    Ok(checked_quiet(Command::new("du").args([OsStr::new("-sb"), path.as_os_str()]))
         .await?
         .split_whitespace()
         .next()

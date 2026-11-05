@@ -13,6 +13,20 @@ const TIMEOUT: Duration = Duration::from_secs(600);
 
 const LIB: &str = "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n";
 
+const JOBS: &str = r#"  { name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" },
+  { name = "bins", cmd = "cargo clippy --bins --message-format=json -- -D warnings", bins_only = true },
+  { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1', on_main = 'cargo-slapslop run "$PWD"', args = "--all-lints", slapslop = true },
+  { name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {packages}" },
+"#;
+
+const CLIPPY: &str = r#"  { name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings" },
+"#;
+
+const STUCK_CLIPPY: &str = r#"  { name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", on_patch = "sleep 600" },
+"#;
+
+const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs";
+
 struct Warmd {
     child: Child,
     url: String,
@@ -21,51 +35,39 @@ struct Warmd {
 
 impl Warmd {
     fn start() -> Self {
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("e2e-{}", std::process::id()));
-        if root.exists() {
-            fs::remove_dir_all(&root).unwrap();
-        }
-        fs::create_dir_all(root.join("demo/src")).unwrap();
-        fs::write(
-            root.join("demo/Cargo.toml"),
-            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("demo/src/lib.rs"), LIB).unwrap();
-        fs::write(root.join("demo/.gitignore"), "target\n").unwrap();
-        sh(
-            &root.join("demo"),
-            "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm init",
-        );
-        sh(&root, "git clone -q --bare demo demo.git");
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let repos = format!(
-            r#"listen = "127.0.0.1:{port}"
-state_dir = "{state}"
-poll_secs = 3600
-keep_hours = 1
+        let root = demo_root("e2e");
+        Self::serve(root.clone(), &root, "", JOBS, &[])
+    }
 
-[repos.demo]
-url = "file://{root}/demo.git"
-jobs = [
-  {{ name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", fix = "cargo clippy --fix --allow-dirty --allow-no-vcs" }},
-  {{ name = "bins", cmd = "cargo clippy --bins --message-format=json -- -D warnings", bins_only = true }},
-  {{ name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1', on_main = 'cargo-slapslop run "$PWD"', args = "--all-lints", slapslop = true }},
-  {{ name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {{packages}}" }},
-]
-"#,
-            state = root.join("state").display(),
-            root = root.display(),
+    fn serve(dir: PathBuf, origin: &Path, top: &str, jobs: &str, env: &[(&str, &str)]) -> Self {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        Self::serve_with(dir, origin, port, top, jobs, env)
+    }
+
+    fn serve_on(dir: PathBuf, origin: &Path, port: u16, top: &str, jobs: &str) -> Self {
+        Self::serve_with(dir, origin, port, top, jobs, &[])
+    }
+
+    fn serve_with(dir: PathBuf, origin: &Path, port: u16, top: &str, jobs: &str, env: &[(&str, &str)]) -> Self {
+        fs::create_dir_all(&dir).unwrap();
+        let repos = format!(
+            "listen = \"127.0.0.1:{port}\"\nstate_dir = \"{state}\"\npoll_secs = 3600\nkeep_hours = 1\n{top}\n[repos.demo]\nurl = \"file://{origin}/demo.git\"\njobs = [\n{jobs}]\n",
+            state = dir.join("state").display(),
+            origin = origin.display(),
         );
-        fs::write(root.join("repos.toml"), repos).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_warmd")).arg(&root).spawn().unwrap();
-        let warmd = Self { child, url: format!("http://127.0.0.1:{port}"), root };
+        fs::write(dir.join("repos.toml"), repos).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_warmd")).arg(&dir).envs(env.iter().copied()).spawn().unwrap();
+        let warmd = Self { child, url: format!("http://127.0.0.1:{port}"), root: origin.to_owned() };
         until(|| warmd.repo()["current"].is_string());
         warmd
     }
 
+    fn get(&self, path: &str) -> Value {
+        curl("GET", &format!("{}{path}", self.url), None).unwrap_or(Value::Null)
+    }
+
     fn repo(&self) -> Value {
-        curl("GET", &format!("{}/repos/demo", self.url), None).unwrap_or(Value::Null)
+        self.get("/repos/demo")
     }
 
     fn job(&self, path: &str, body: &Value) -> Value {
@@ -102,6 +104,21 @@ impl Drop for Warmd {
             eprintln!("killing warmd: {err}");
         }
     }
+}
+
+fn demo_root(tag: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{tag}-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).unwrap();
+    }
+    fs::create_dir_all(root.join("demo/src")).unwrap();
+    fs::write(root.join("demo/Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")
+        .unwrap();
+    fs::write(root.join("demo/src/lib.rs"), LIB).unwrap();
+    fs::write(root.join("demo/.gitignore"), "target\n").unwrap();
+    sh(&root.join("demo"), "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm init");
+    sh(&root, "git clone -q --bare demo demo.git");
+    root
 }
 
 fn until(mut done: impl FnMut() -> bool) {
@@ -144,7 +161,7 @@ fn checks_patches_against_warm_generations() {
     assert_eq!(hits["sha"], base);
     assert!(hits["jobs"]["slapslop"].is_array());
 
-    let patch = warmd.diff("printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
+    let patch = warmd.diff(FIRST);
     let body = json!({
         "repo": "demo",
         "base": { "ref": "main", "sha": base },
@@ -153,7 +170,7 @@ fn checks_patches_against_warm_generations() {
         "branch": "feat/first",
     });
     let ids = curl("POST", &format!("{}/check", warmd.url), Some(&body)).unwrap();
-    let live = curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["live"].clone();
+    let live = warmd.get("/stats")["live"].clone();
     assert!(live.as_array().unwrap().iter().any(|job| job["kind"] == "full"), "{live:#}");
     assert!(live.as_array().unwrap().iter().all(|job| job["request"]["patch_lines"].as_u64() > Some(0)), "{live:#}");
     let job = warmd.wait(ids["id"].as_str().unwrap());
@@ -213,7 +230,7 @@ fn checks_patches_against_warm_generations() {
     assert!(codes(&report["jobs"][0]["new"]).contains(&"clippy::must_use_candidate"), "{report:#}");
     assert!(codes(&report["jobs"][1]["new"]).iter().all(|code| *code == "wide_tuple"), "{report:#}");
 
-    let first = warmd.diff("printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs");
+    let first = warmd.diff(FIRST);
     let session =
         |patch: &str| json!({ "repo": "demo", "base": { "sha": base }, "patch": patch, "session": "feat/first" });
     let job = warmd.job("check", &session(&first));
@@ -328,7 +345,7 @@ fn checks_patches_against_warm_generations() {
     assert!(!names(&job["result"]["jobs"]).contains(&"broken"), "{job:#}");
     assert_eq!(job["result"]["ok"], true, "{job:#}");
 
-    let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
+    let stats = warmd.get("/stats");
     assert!(stats["machine"]["cores"].as_u64() > Some(0), "{stats:#}");
     assert!(!stats["machine"]["cpu_model"].as_str().unwrap().is_empty(), "{stats:#}");
     assert_eq!(stats["repos"][0]["view"]["gens"].as_array().unwrap().len(), 3, "{stats:#}");
@@ -350,13 +367,9 @@ fn checks_patches_against_warm_generations() {
     assert!(clippy["start_secs"].as_f64() > Some(0.0), "{clippy:#}");
     assert_eq!(first["fields"]["ran_on"], json!(base));
     assert_eq!((first["fields"]["base"].clone(), first["fields"]["dirty"].clone()), (json!(base), json!(true)));
-    until(|| {
-        curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][1]["bytes"].is_u64()
-    });
-    until(|| {
-        curl("GET", &format!("{}/stats", warmd.url), None).unwrap()["repos"][0]["view"]["gens"][0]["own_bytes"].is_u64()
-    });
-    let stats = curl("GET", &format!("{}/stats", warmd.url), None).unwrap();
+    until(|| warmd.get("/stats")["repos"][0]["view"]["gens"][1]["bytes"].is_u64());
+    until(|| warmd.get("/stats")["repos"][0]["view"]["gens"][0]["own_bytes"].is_u64());
+    let stats = warmd.get("/stats");
     let parts = stats["repos"][0]["view"]["gens"][1]["parts"].as_array().unwrap();
     let jobs_of = |bucket: &str| {
         parts
@@ -373,4 +386,46 @@ fn checks_patches_against_warm_generations() {
     let kinds = metrics.lines().map(|line| from_str::<Value>(line).unwrap()["kind"].clone()).collect::<Vec<_>>();
     assert!(kinds.contains(&json!("build")), "{kinds:?}");
     assert!(kinds.contains(&json!("check")), "{kinds:?}");
+}
+
+#[test]
+fn spreads_checks_to_remotes_and_requeues_when_one_drops() {
+    let root = demo_root("lb");
+    let stuck = Warmd::serve(root.join("stuck"), &root, "", STUCK_CLIPPY, &[]);
+    let fresh_port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let stuck_addr = stuck.url.trim_start_matches("http://").to_owned();
+    let fresh_addr = format!("127.0.0.1:{fresh_port}");
+    let lead = Warmd::serve(root.clone(), &root, "jobs_per_repo = 0\nlease_secs = 3", CLIPPY, &[]);
+    let remotes = format!("{}/remotes", lead.url);
+    assert!(
+        curl("POST", &remotes, Some(&json!({ "addr": "no-port" }))).is_none(),
+        "an address without a port is refused"
+    );
+    for addr in [&stuck_addr, &fresh_addr] {
+        assert_eq!(curl("POST", &remotes, Some(&json!({ "addr": addr }))).unwrap()["added"], true);
+    }
+    let patch = lead.diff(FIRST);
+    let body = json!({ "repo": "demo", "base": { "sha": lead.head() }, "patch": patch, "branch": "feature", "session": "feature" });
+    let id = curl("POST", &format!("{}/check", lead.url), Some(&body)).unwrap()["id"].as_str().unwrap().to_owned();
+    until(|| {
+        lead.get("/stats")["live"].as_array().is_some_and(|live| live.iter().any(|job| job["remote"] == stuck_addr))
+    });
+    drop(stuck);
+
+    let fresh = Warmd::serve_on(root.join("fresh"), &root, fresh_port, "", CLIPPY);
+    let job = lead.wait(&id);
+    assert_eq!(job["result"]["remote"], fresh_addr, "{job:#}");
+    assert_eq!(names(&job["result"]["jobs"]), ["clippy"]);
+    assert!(codes(&job["result"]["jobs"][0]["new"]).contains(&"clippy::ptr_arg"), "{job:#}");
+    let seen = lead.get("/stats")["balance"]["remotes"].clone();
+    let gone = seen.as_array().unwrap().iter().find(|remote| remote["addr"] == stuck_addr).unwrap();
+    assert_eq!(gone["up"], false, "a remote that lost a job counts as down: {seen:#}");
+
+    let again = lead.job("check", &body);
+    let removed = curl("DELETE", &format!("{remotes}/{stuck_addr}"), None).unwrap();
+    assert_eq!(removed["removed"], true, "{removed:#}");
+    assert_eq!(lead.get("/remotes")["remotes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(again["result"]["remote"], fresh_addr, "{again:#}");
+    assert_eq!(again["result"]["session_reused"], true, "the branch went back to its warm session: {again:#}");
+    drop(fresh);
 }

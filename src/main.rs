@@ -4,32 +4,37 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
     env,
-    path::PathBuf,
+    io::ErrorKind,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Html,
-    routing::{get, post},
+    routing::{delete, get, post},
     serve,
 };
-use serde::Serialize;
-use serde_json::{Value, json, to_value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, from_str, json, to_value};
 use tokio::{
+    fs::{read_to_string, write},
     net::TcpListener,
     process::Command,
+    select,
     signal::unix::{SignalKind, signal},
     spawn,
+    sync::{Semaphore, SemaphorePermit},
     time::sleep,
 };
 use uuid::Uuid;
 
 use crate::{
+    balance::{Balancer, Pending, Source},
     check::{Outcome, Request},
     config::{Config, Profile},
     metrics::{Clock, Phase, RETAIN_SECS, with_commands},
@@ -37,12 +42,14 @@ use crate::{
     stats::{Machine, now_secs},
 };
 
+mod balance;
 mod check;
 mod config;
 mod diag;
 mod hits_view;
 mod lanes;
 mod metrics;
+mod remote;
 mod repo;
 mod sandbox;
 mod stats;
@@ -54,6 +61,12 @@ const PRUNE_EVERY: Duration = Duration::from_hours(1);
 const RECENT_PER_REPO: usize = 100;
 
 const RECENT_JOBS: usize = 25;
+
+const DISPATCH_RECHECK: Duration = Duration::from_secs(1);
+
+const REMOTES_FILE: &str = "remotes.json";
+
+static RUNNING: Semaphore = Semaphore::const_new(256);
 
 type Reply<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -71,6 +84,7 @@ enum Job {
 enum Done {
     Check(Outcome),
     Refresh(View),
+    Remote(Value),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +95,7 @@ struct Live {
     base: String,
     started: u64,
     running_since: Option<u64>,
+    remote: Option<String>,
     request: Value,
 }
 
@@ -89,6 +104,8 @@ struct App {
     repos: Mutex<BTreeMap<String, Arc<Repo>>>,
     full: Profile,
     jobs: Mutex<HashMap<Uuid, (u64, Job)>>,
+    balance: Balancer,
+    lease: Duration,
     live: Mutex<HashMap<Uuid, Live>>,
     config_dir: PathBuf,
     keep: Duration,
@@ -139,6 +156,18 @@ impl App {
         };
         self.set(id, job);
     }
+
+    fn update_live(&self, id: Uuid, change: impl FnOnce(&mut Live)) {
+        if let Some(entry) = self.live.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&id) {
+            change(entry);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddRemote {
+    addr: String,
 }
 
 #[tokio::main]
@@ -158,6 +187,8 @@ async fn main() -> anyhow::Result<()> {
         full: Profile::full()?,
         config_dir: dir,
         jobs: Mutex::default(),
+        balance: Balancer::new(load_remotes(&config.state_dir).await),
+        lease: Duration::from_secs(config.lease_secs),
         live: Mutex::default(),
         keep,
         machine: Machine::default(),
@@ -176,6 +207,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
         spawn(prune_remote_forever(PathBuf::from(remote)));
     }
+    spawn(dispatch_forever(Arc::clone(&app)));
+    spawn(remote::poll_capacity_forever(Arc::clone(&app)));
     let sampler = Arc::clone(&app);
     spawn(async move { sampler.machine.sample_forever().await });
     let router = Router::new()
@@ -188,6 +221,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/repos/{name}/refresh", post(refresh))
         .route("/repos/{name}/hits", get(hits))
         .route("/repos/{name}/hits/view", get(hits_view))
+        .route("/capacity", get(capacity))
+        .route("/remotes", get(remotes_view).post(add_remote))
+        .route("/remotes/{addr}", delete(remove_remote))
         .with_state(app);
     serve(TcpListener::bind(&config.listen).await.with_context(|| format!("binding {}", config.listen))?, router)
         .await?;
@@ -215,24 +251,133 @@ fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
         base: req.base_sha().to_owned(),
         started: now_secs(),
         running_since: None,
+        remote: None,
         request: req.summary(),
     };
     app.live.lock().unwrap_or_else(PoisonError::into_inner).insert(id, live);
-    let (app, repo) = (Arc::clone(app), Arc::clone(repo));
-    spawn(async move {
-        let layer = repo.jobs_dir().join(id.to_string());
-        let running = || {
-            app.set(id, Job::Running { progress: None });
-            if let Some(entry) = app.live.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&id) {
-                entry.running_since = Some(now_secs());
-            }
-        };
-        let progress = |value| app.set(id, Job::Running { progress: Some(value) });
-        let (outcome, phases) = with_commands(check::run(&repo, &app.full, req, &layer, running, progress)).await;
-        app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
-        app.finish(id, outcome.map(Done::Check), phases);
-    });
+    app.balance.enqueue(Pending::new(id, req));
     id
+}
+
+async fn dispatch_forever(app: Arc<App>) -> ! {
+    loop {
+        let woken = app.balance.wake().notified();
+        while let Some((job, source)) = app.balance.next(&|name: &str, started: u32| {
+            app.repo(name).is_ok_and(|repo| started < repo.slot_count() && repo.free_slots() > 0)
+        }) {
+            let Ok(permit) = RUNNING.acquire().await else { continue };
+            spawn(run(Arc::clone(&app), job, source, permit));
+        }
+        select! {
+            () = woken => {}
+            () = sleep(DISPATCH_RECHECK) => {}
+        }
+    }
+}
+
+async fn run(app: Arc<App>, job: Pending, source: Source, permit: SemaphorePermit<'static>) {
+    let repo_name = job.req().repo().to_owned();
+    match &source {
+        Source::Local => match app.repo(&repo_name) {
+            Ok(repo) => run_local(&app, &repo, job.id(), job.into_req()).await,
+            Err((_, why)) => {
+                app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&job.id());
+                app.finish(job.id(), Err(anyhow!(why)), Vec::new());
+            }
+        },
+        Source::Remote(addr) => run_remote(&app, addr, job).await,
+    }
+    app.balance.ended(&repo_name, &source);
+    drop(permit);
+}
+
+async fn run_local(app: &Arc<App>, repo: &Arc<Repo>, id: Uuid, req: Request) {
+    let layer = repo.jobs_dir().join(id.to_string());
+    let running = || {
+        app.set(id, Job::Running { progress: None });
+        app.update_live(id, |entry| entry.running_since = Some(now_secs()));
+    };
+    let progress = |value| app.set(id, Job::Running { progress: Some(value) });
+    let (outcome, phases) = with_commands(check::run(repo, &app.full, req, &layer, running, progress)).await;
+    app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+    app.finish(id, outcome.map(Done::Check), phases);
+}
+
+async fn run_remote(app: &Arc<App>, addr: &str, job: Pending) {
+    let id = job.id();
+    app.set(id, Job::Running { progress: None });
+    app.update_live(id, |entry| {
+        entry.running_since = Some(now_secs());
+        entry.remote = Some(addr.to_owned());
+    });
+    let progress = |value| app.set(id, Job::Running { progress: Some(value) });
+    let (result, phases) = match remote::run(app, addr, job.req(), app.lease, progress).await {
+        remote::End::Done(result, phases) => (Ok(Done::Remote(result)), phases),
+        remote::End::Failed(why, phases) => (Err(anyhow!(why)), phases),
+        remote::End::Lost(why) => match app.balance.give_back(job, addr, &why) {
+            None => {
+                eprintln!("warmd: {id}: {why}; queued again");
+                app.set(id, Job::Queued);
+                app.update_live(id, |entry| {
+                    entry.running_since = None;
+                    entry.remote = None;
+                });
+                return;
+            }
+            Some(failed) => (Err(anyhow!(failed)), Vec::new()),
+        },
+    };
+    app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+    app.finish(id, result, phases);
+}
+
+async fn remotes_view(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(app.balance.view())
+}
+
+async fn add_remote(State(app): State<Arc<App>>, Json(body): Json<AddRemote>) -> Reply<Value> {
+    let addr = body.addr.trim().trim_start_matches("http://").trim_end_matches('/').to_owned();
+    if !addr.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok()) {
+        return Err((StatusCode::BAD_REQUEST, format!("{addr:?} is not ip:port (or host:port)")));
+    }
+    let added = app.balance.add(&addr);
+    save_remotes(&app).await?;
+    Ok(Json(json!({ "addr": addr, "added": added })))
+}
+
+async fn remove_remote(State(app): State<Arc<App>>, Path(addr): Path<String>) -> Reply<Value> {
+    let removed = app.balance.remove(&addr);
+    save_remotes(&app).await?;
+    Ok(Json(json!({ "addr": addr, "removed": removed })))
+}
+
+async fn save_remotes(app: &App) -> Result<(), (StatusCode, String)> {
+    write(app.state_dir.join(REMOTES_FILE), json!(app.balance.remotes()).to_string())
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("saving the remotes: {err}")))
+}
+
+async fn load_remotes(state_dir: &FsPath) -> Vec<String> {
+    match read_to_string(state_dir.join(REMOTES_FILE)).await {
+        Ok(text) => from_str(&text).unwrap_or_else(|err| {
+            eprintln!("warmd: {REMOTES_FILE}: {err}; starting without remotes");
+            Vec::new()
+        }),
+        Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            eprintln!("warmd: {REMOTES_FILE}: {err}; starting without remotes");
+            Vec::new()
+        }
+    }
+}
+
+async fn capacity(State(app): State<Arc<App>>) -> Json<Value> {
+    let repos = app
+        .repos()
+        .into_iter()
+        .map(|(name, repo)| (name, json!({ "built": repo.current().is_some(), "free": repo.free_slots() })))
+        .collect::<Map<_, _>>();
+    Json(json!({ "repos": repos }))
 }
 
 async fn slapslop_baseline(app: State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
@@ -323,9 +468,15 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
             repo.building().map(|(sha, since)| json!({ "repo": name, "sha": sha, "started": since }))
         })
         .collect::<Vec<_>>();
-    Json(
-        json!({ "machine": machine, "repos": repos, "recent": recent, "jobs": counts, "live": live, "building": builds }),
-    )
+    Json(json!({
+        "machine": machine,
+        "repos": repos,
+        "recent": recent,
+        "jobs": counts,
+        "live": live,
+        "building": builds,
+        "balance": app.balance.view(),
+    }))
 }
 
 async fn prune_remote_forever(dir: PathBuf) -> ! {

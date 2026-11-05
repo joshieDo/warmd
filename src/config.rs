@@ -23,6 +23,8 @@ pub(crate) struct Config {
     pub(crate) keep_hours: u64,
     #[serde(default = "default_jobs_per_repo")]
     pub(crate) jobs_per_repo: u16,
+    #[serde(default = "default_lease_secs")]
+    pub(crate) lease_secs: u64,
     pub(crate) repos: BTreeMap<String, RepoCfg>,
 }
 
@@ -153,6 +155,10 @@ const fn default_poll_secs() -> u64 {
 
 const fn default_keep_hours() -> u64 {
     0
+}
+
+const fn default_lease_secs() -> u64 {
+    60
 }
 
 const fn default_jobs_per_repo() -> u16 {

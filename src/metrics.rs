@@ -1,6 +1,6 @@
 use std::{cell::RefCell, path::Path, time::Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_str, json, to_string};
 use tokio::{
     fs::{OpenOptions, read_to_string, rename, write},
@@ -21,14 +21,14 @@ task_local! {
     static COMMANDS: RefCell<Vec<String>>;
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Phase {
     name: String,
     start_secs: f64,
     secs: f64,
     commands: Vec<String>,
     /// The lane of a job that ran beside others; none for a step of the run itself.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     lane: Option<String>,
 }
 

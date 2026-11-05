@@ -9,6 +9,7 @@ usage() {
 usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON]
        warmd track [JOB_ID]
        warmd hits [REPO] [JOB]
+       warmd remote [ls | add IP:PORT | rm IP:PORT]
 EOF
   exit 2
 }
@@ -112,6 +113,15 @@ case $cmd in
       "warmd: \(.jobs | to_entries | map(select($job == "" or .key == $job)) | map(.value | length) | add // 0) hits on \($repo) main \(.sha[:7])",
       (.jobs | to_entries[] | select($job == "" or .key == $job) | select(.value | length > 0) |
         "== \(.key) (\(.value | length))\n" + (.value | map(.rendered) | join("")))' --arg repo "$repo"
+    exit
+    ;;
+  remote)
+    case ${1:-ls} in
+      ls) curl -fsS "$url/remotes" | jq -r '.remotes[] | "\(.addr) \(if .up then "up, \(.running) running" else "down" + (if .error then ": \(.error)" else "" end) end)"' ;;
+      add) [[ $# -eq 2 ]] || usage; curl -fsS -X POST "$url/remotes" -H 'content-type: application/json' -d "$(jq -nc --arg addr "$2" '{addr: $addr}')" | jq -c . ;;
+      rm) [[ $# -eq 2 ]] || usage; curl -fsS -X DELETE "$url/remotes/$2" | jq -c . ;;
+      *) usage ;;
+    esac
     exit
     ;;
   check) ;;
