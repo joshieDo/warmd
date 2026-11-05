@@ -449,12 +449,12 @@ async fn check(
     if !session_reused {
         repo::remove_tree(layer).await?;
     }
-    let (upper, work) = (layer.join("upper"), layer.join("work"));
-    create_dir_all(&upper).await?;
-    create_dir_all(&work).await?;
+    for dir in ["upper", "work"] {
+        create_dir_all(layer.join(dir)).await?;
+    }
     clock.mark("setup");
-    let sandbox =
-        Sandbox { repo: repo.name(), tree: Tree::Overlay { lower: generation.dir(), upper: &upper, work: &work } };
+    let cache = repo.cache_dir();
+    let sandbox = Sandbox { repo: repo.name(), tree: Tree::Overlay { lower: generation.dir(), layer, cache: &cache } };
 
     if rebased_from.is_some() {
         if session_reused {

@@ -78,6 +78,15 @@ impl Repo {
         let sessions = keep_sessions(&jobs_dir).await?;
         fs::create_dir_all(&jobs_dir)?;
         fs::create_dir_all(&gens_dir)?;
+        let cache = gens_dir.with_file_name("cache");
+        for overlay in ["upper", "work"] {
+            if let Err(err) = fs::remove_dir_all(cache.join(overlay))
+                && err.kind() != ErrorKind::NotFound
+            {
+                eprintln!("warmd: {name}: removing the old {overlay} cache dir: {err}");
+            }
+        }
+        fs::create_dir_all(cache.join("home"))?;
         let gens = adopt(&gens_dir)?;
         spawn(measure(gens.clone()));
         let metrics_file = state_dir.join(&name).join("metrics.jsonl");
@@ -181,7 +190,7 @@ impl Repo {
         }
         views.sort_by_key(|view| Reverse(view.bytes));
         *self.session_views.lock().unwrap_or_else(PoisonError::into_inner) = views;
-        let cache = self.gens_dir.with_file_name("cache").join("upper");
+        let cache = self.cache_dir();
         if symlink_metadata(&cache).await.is_ok() {
             self.cache_bytes.store(dir_bytes(&cache).await?, Ordering::Relaxed);
         }
@@ -195,6 +204,10 @@ impl Repo {
 
     pub(crate) fn jobs_dir(&self) -> &Path {
         &self.jobs_dir
+    }
+
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.gens_dir.with_file_name("cache").join("home")
     }
 
     pub(crate) fn free_slots(&self) -> usize {
@@ -363,9 +376,7 @@ impl Repo {
         let _all = self.slots.acquire_many(self.slot_count).await?;
         self.set_status(State::Refreshing, &current.sha, None, Vec::new());
         let mut clock = Clock::start();
-        let cache = self.gens_dir.with_file_name("cache");
-        fs::create_dir_all(cache.join("upper"))?;
-        fs::create_dir_all(cache.join("work"))?;
+        let cache = self.cache_dir();
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &current.dir, cache: &cache } };
         let cfg = self.cfg();
         let mut baseline = current.baseline.clone();
@@ -442,9 +453,7 @@ impl Repo {
         clock.mark("checkout");
         git(&tmp, &["submodule", "update", "--quiet", "--init", "--recursive"]).await?;
         clock.mark("submodules");
-        let cache = self.gens_dir.with_file_name("cache");
-        fs::create_dir_all(cache.join("upper"))?;
-        fs::create_dir_all(cache.join("work"))?;
+        let cache = self.cache_dir();
         let sandbox = Sandbox { repo: &self.name, tree: Tree::Build { dir: &tmp, cache: &cache } };
         let cfg = self.cfg();
         let mut baseline = Baseline::new();

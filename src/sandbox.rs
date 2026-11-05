@@ -86,7 +86,6 @@ impl Sandbox<'_> {
         let cargo_home = env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
         let rustup_home = env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
         let cache = home.join(".cache");
-        create_dir_all(&cache).await?;
         let work = work_path(self.repo);
         let mut bwrap = Command::new("bwrap");
         bwrap.args(["--die-with-parent", "--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]);
@@ -97,16 +96,10 @@ impl Sandbox<'_> {
                 for shared in [&cargo_home, &rustup_home] {
                     bwrap.arg("--bind").arg(shared).arg(shared);
                 }
-                bwrap
-                    .arg("--overlay-src")
-                    .arg(&cache)
-                    .arg("--overlay")
-                    .arg(repo_cache.join("upper"))
-                    .arg(repo_cache.join("work"))
-                    .arg(&cache);
+                bwrap.arg("--bind").arg(repo_cache).arg(&cache);
                 bwrap.arg("--bind").arg(dir).arg(&work);
             }
-            Tree::Overlay { lower, upper, work: overlay_work } => {
+            Tree::Overlay { lower, layer, cache: repo_cache } => {
                 bwrap.arg("--tmpfs").arg(&home);
                 bwrap.arg("--ro-bind").arg(&rustup_home).arg(&rustup_home);
                 // The tools on PATH under the home the tmpfs hides (slapslop installed outside ~/.local in CI).
@@ -118,10 +111,15 @@ impl Sandbox<'_> {
                 ) {
                     bwrap.arg("--ro-bind-try").arg(&tool_dir).arg(&tool_dir);
                 }
-                for scratch in [&cargo_home, &cache] {
-                    bwrap.arg("--overlay-src").arg(scratch).arg("--tmp-overlay").arg(scratch);
-                }
-                bwrap.arg("--overlay-src").arg(lower).arg("--overlay").arg(upper).arg(overlay_work).arg(&work);
+                bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
+                bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
+                bwrap
+                    .arg("--overlay-src")
+                    .arg(lower)
+                    .arg("--overlay")
+                    .arg(layer.join("upper"))
+                    .arg(layer.join("work"))
+                    .arg(&work);
             }
         }
         bwrap.args(["--setenv", "SLAPSLOP_CACHE", &format!("{work}/{SLAPSLOP_CACHE}")]);
@@ -222,7 +220,7 @@ pub(crate) struct LaneJob<'job> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Tree<'a> {
     Build { dir: &'a Path, cache: &'a Path },
-    Overlay { lower: &'a Path, upper: &'a Path, work: &'a Path },
+    Overlay { lower: &'a Path, layer: &'a Path, cache: &'a Path },
 }
 
 #[derive(Debug)]
