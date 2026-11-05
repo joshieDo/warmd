@@ -108,14 +108,12 @@ impl Sandbox<'_> {
                 bwrap.arg("--tmpfs").arg(&home);
                 bwrap.arg("--ro-bind").arg(&rustup_home).arg(&rustup_home);
                 // The tools on PATH under the home the tmpfs hides (slapslop installed outside ~/.local in CI).
-                let on_path =
-                    env::var_os("PATH").map(|path| env::split_paths(&path).collect::<Vec<_>>()).unwrap_or_default();
-                let tools = [home.join(".local/bin"), home.join(".local/share/slapslop")].into_iter().chain(
+                let on_path = env::var_os("PATH").map_or_default(|path| env::split_paths(&path).collect::<Vec<_>>());
+                for tool_dir in [home.join(".local/bin"), home.join(".local/share/slapslop")].into_iter().chain(
                     on_path.into_iter().filter(|dir| {
                         dir.starts_with(&home) && !dir.starts_with(&cargo_home) && !dir.starts_with(&rustup_home)
                     }),
-                );
-                for tool_dir in tools {
+                ) {
                     bwrap.arg("--ro-bind-try").arg(&tool_dir).arg(&tool_dir);
                 }
                 for scratch in [&cargo_home, &cache] {
