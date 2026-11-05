@@ -254,7 +254,7 @@ function tree(i) {
   const r = last.repos[i], v = r.view, gens = [...v.gens].reverse(), main = gens[0], older = gens.slice(1);
   const sessions = v.sessions || [];
   const checks = r.checks.filter(c => c.kind === "check" || c.kind === "full" || c.kind === "slapslop_baseline").reverse().slice(0, 15);
-  const label = p => p.jobs.includes("source") ? "source" : p.jobs.includes("slapslop") ? "slapslop target" : p.jobs.length === 1 && p.jobs[0] === "fmt" ? "fmt" : "cargo target (" + p.jobs.join(", ") + ")";
+  const label = p => p.jobs.includes("source") ? "source" : p.jobs.includes("slapslop") ? "slapslop target" : p.jobs.length === 1 && p.jobs[0] === "fmt" ? "fmt" : p.jobs.length === 1 && p.jobs[0] === "release" ? "release target" : p.jobs.length && p.jobs.every(j => j === "test") ? "test target" : p.jobs.includes("test") ? "shared target (build scripts, proc macros)" : "clippy target (" + p.jobs.join(", ") + ")";
   const mainParts = (main?.parts || []).filter(p => p.bytes > 0).sort((a, b) => b.bytes - a.bytes);
   const segs = [
     ...mainParts.map(p => ({ name: "main · " + label(p), bytes: p.bytes, cls: "s-main" })),

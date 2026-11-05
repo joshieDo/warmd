@@ -217,14 +217,19 @@ impl Repo {
         };
         let mut labeled = parts
             .iter()
-            .map(|(bucket, bytes)| {
-                let names = match *bucket {
+            .map(|(bucket, bytes)| Part {
+                jobs: match *bucket {
                     "cargo" => names(&|job| !job.slapslop && !job.cmd.contains(" fmt")),
+                    "clippy" => names(&|job| !job.slapslop && !job.test && !job.cmd.contains(" fmt")),
+                    "test" => names(&|job| job.test),
                     "slapslop" => names(&|job| job.slapslop),
-                    "release" => names(&|job| job.cmd.contains("--release")),
+                    "release" => {
+                        let release = names(&|job| job.cmd.contains("--release"));
+                        if release.is_empty() { vec!["release".to_owned()] } else { release }
+                    }
                     other => vec![other.to_owned()],
-                };
-                Part { jobs: names, bytes: *bytes }
+                },
+                bytes: *bytes,
             })
             .collect::<Vec<_>>();
         labeled.sort_by(|left, right| left.jobs.cmp(&right.jobs));
@@ -719,16 +724,18 @@ fn measure_blocks(gens: &[Arc<Gen>]) -> anyhow::Result<()> {
     let mut seen = HashSet::new();
     for (index, generation) in gens.iter().rev().enumerate() {
         let mut parts = Parts::new();
+        let (mut units, macros) = (HashMap::new(), proc_macros(&generation.dir.join("target/debug/build"))?);
         walk_files(&generation.dir, &mut |relative, path| {
+            let part = part_of(&generation.dir, &mut units, &macros, relative)?;
             for extent in fiemap(path)? {
                 match extent {
                     Ok(extent) => {
                         if seen.insert(extent.fe_physical) || extent.fe_physical == 0 {
-                            *parts.entry(part_of(relative)).or_default() += extent.fe_length;
+                            *parts.entry(part).or_default() += extent.fe_length;
                         }
                     }
                     Err(err) if err.kind() == ErrorKind::Unsupported => {
-                        *parts.entry(part_of(relative)).or_default() += fs::metadata(path)?.len();
+                        *parts.entry(part).or_default() += fs::metadata(path)?.len();
                         break;
                     }
                     Err(err) => return Err(err).with_context(|| format!("mapping {}", path.display())),
@@ -765,16 +772,95 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path, &Path) -> anyhow::Result
     Ok(())
 }
 
-fn part_of(relative: &Path) -> &'static str {
+fn part_of(
+    root: &Path,
+    units: &mut HashMap<PathBuf, &'static str>,
+    macros: &HashSet<String>,
+    relative: &Path,
+) -> anyhow::Result<&'static str> {
     if relative.starts_with("target/slapslop") {
-        "slapslop"
-    } else if relative.starts_with("target/release") {
-        "release"
-    } else if relative.starts_with("target") {
-        "cargo"
-    } else {
-        "source"
+        return Ok("slapslop");
     }
+    if relative.starts_with("target/release") {
+        return Ok("release");
+    }
+    if !relative.starts_with("target") {
+        return Ok("source");
+    }
+    let parts = relative.iter().collect::<Vec<_>>();
+    Ok(match parts.get(2).and_then(|part| part.to_str()) {
+        Some("incremental")
+            if parts
+                .get(3)
+                .and_then(|dir| dir.to_str()?.rsplit_once('-'))
+                .is_some_and(|(name, _)| macros.contains(name)) =>
+        {
+            "cargo"
+        }
+        Some("build")
+            if parts.len() > 5 && !root.join(parts[..5].iter().collect::<PathBuf>()).join("fingerprint").is_dir() =>
+        {
+            "cargo"
+        }
+        Some("build" | "incremental") if parts.len() > 5 => {
+            let unit = parts[..5].iter().collect::<PathBuf>();
+            if let Some(kind) = units.get(&unit) {
+                kind
+            } else {
+                let kind = unit_kind(&root.join(&unit))?;
+                units.insert(unit, kind);
+                kind
+            }
+        }
+        Some("deps") => match relative.extension().and_then(|ext| ext.to_str()) {
+            Some("rmeta" | "d") => "clippy",
+            Some("so") => "cargo",
+            Some(_) | None => "test",
+        },
+        Some(_) | None => "cargo",
+    })
+}
+
+fn proc_macros(build: &Path) -> anyhow::Result<HashSet<String>> {
+    let mut macros = file_names(&build.with_file_name("deps"))?
+        .iter()
+        .filter_map(|file| Some(file.strip_suffix(".so")?.strip_prefix("lib")?.rsplit_once('-')?.0.to_owned()))
+        .collect::<HashSet<_>>();
+    for package in file_names(build)? {
+        for unit in file_names(&build.join(&package))? {
+            for file in file_names(&build.join(&package).join(unit).join("out"))? {
+                if let Some(name) = file.strip_suffix(".so").and_then(|stem| stem.strip_prefix("lib")?.rsplit_once('-'))
+                {
+                    macros.insert(name.0.to_owned());
+                }
+            }
+        }
+    }
+    Ok(macros)
+}
+
+fn file_names(dir: &Path) -> anyhow::Result<Vec<String>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    fs::read_dir(dir)?.map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned())).collect()
+}
+
+fn unit_kind(dir: &Path) -> anyhow::Result<&'static str> {
+    let fingerprints = file_names(&dir.join("fingerprint"))?;
+    if fingerprints.iter().any(|name| name.starts_with("build-script") || name.starts_with("run-build-script")) {
+        return Ok("cargo");
+    }
+    let files = file_names(&if fingerprints.is_empty() { dir.to_owned() } else { dir.join("out") })?;
+    Ok(if files.iter().any(|name| Path::new(name).extension().is_some_and(|ext| ext == "so")) {
+        "cargo"
+    } else if files.iter().any(|name| {
+        Path::new(name).extension().is_none_or(|ext| ["rlib", "o", "dwo", "a"].iter().any(|code| ext == *code))
+    }) {
+        "test"
+    } else {
+        "clippy"
+    })
 }
 
 fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
