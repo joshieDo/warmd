@@ -2,12 +2,14 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
-    io::ErrorKind,
+    fs::{OpenOptions, metadata, read_dir as std_read_dir, remove_dir, remove_file},
+    io::{ErrorKind, Read as _},
+    os::unix::fs::OpenOptionsExt as _,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, anyhow};
@@ -24,11 +26,11 @@ use serde_json::{Map, Value, from_str, json, to_value};
 use tokio::{
     fs::{read_to_string, write},
     net::TcpListener,
-    process::Command,
     select,
     signal::unix::{SignalKind, signal},
     spawn,
     sync::{Semaphore, SemaphorePermit},
+    task::block_in_place,
     time::sleep,
 };
 use uuid::Uuid;
@@ -57,6 +59,10 @@ mod stats;
 const SECS_PER_HOUR: u64 = 3600;
 
 const PRUNE_EVERY: Duration = Duration::from_hours(1);
+
+const STRAY_AFTER: Duration = Duration::from_hours(1);
+
+const O_NOATIME: i32 = 0o1_000_000;
 
 const RECENT_PER_REPO: usize = 100;
 
@@ -501,13 +507,64 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
 }
 
 async fn prune_remote_forever(dir: PathBuf) -> ! {
-    let days = (RETAIN_SECS / 86_400).to_string();
     loop {
-        if let Err(err) =
-            Command::new("find").arg(&dir).args(["-type", "f", "-mtime", &format!("+{days}"), "-delete"]).status().await
-        {
-            eprintln!("warmd: pruning {}: {err}", dir.display());
+        match block_in_place(|| prune_remote(&dir.join("v1"), SystemTime::now())) {
+            Ok((units, blobs)) if units + blobs > 0 => {
+                eprintln!(
+                    "warmd: slapslop store: removed {units} entries unused for 4 days and {blobs} unreferenced blobs"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!("warmd: pruning {}: {err:#}", dir.display()),
         }
         sleep(PRUNE_EVERY).await;
+    }
+}
+
+fn prune_remote(store: &FsPath, now: SystemTime) -> anyhow::Result<(usize, usize)> {
+    let older = |at: SystemTime, age: Duration| now.duration_since(at).is_ok_and(|since| since > age);
+    let mut live = HashSet::new();
+    let mut units = 0;
+    for prekey in read_dir_or_empty(&store.join("units"))? {
+        let mut kept = false;
+        for entry in read_dir_or_empty(&prekey)? {
+            let meta = metadata(&entry)?;
+            let (accessed, modified) = (meta.accessed()?, meta.modified()?);
+            let is_unit = entry.extension().is_some_and(|ext| ext == "json");
+            let age = if is_unit { Duration::from_secs(RETAIN_SECS) } else { STRAY_AFTER };
+            if older(if is_unit { accessed.max(modified) } else { modified }, age) {
+                remove_file(&entry)?;
+                units += usize::from(is_unit);
+                continue;
+            }
+            kept = true;
+            let mut text = String::new();
+            OpenOptions::new().read(true).custom_flags(O_NOATIME).open(&entry)?.read_to_string(&mut text)?;
+            live.extend(
+                text.split(|char: char| !char.is_ascii_hexdigit()).filter(|token| token.len() == 64).map(str::to_owned),
+            );
+        }
+        if !kept && let Err(err) = remove_dir(&prekey) {
+            eprintln!("warmd: pruning {}: {err}", prekey.display());
+        }
+    }
+    let mut blobs = 0;
+    for blob in read_dir_or_empty(&store.join("blobs"))? {
+        if blob.file_name().is_some_and(|name| live.contains(&*name.to_string_lossy())) {
+            continue;
+        }
+        if older(metadata(&blob)?.modified()?, STRAY_AFTER) {
+            remove_file(&blob)?;
+            blobs += 1;
+        }
+    }
+    Ok((units, blobs))
+}
+
+fn read_dir_or_empty(dir: &FsPath) -> anyhow::Result<Vec<PathBuf>> {
+    match std_read_dir(dir) {
+        Ok(entries) => Ok(entries.map(|entry| entry.map(|entry| entry.path())).collect::<Result<_, _>>()?),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(err).with_context(|| format!("reading {}", dir.display())),
     }
 }
