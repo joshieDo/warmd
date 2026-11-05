@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
     fs,
     io::ErrorKind,
@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::{Context as _, bail};
+use fiemap::fiemap;
 use serde::Serialize;
 use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
@@ -21,6 +22,7 @@ use tokio::{
     process::Command,
     spawn,
     sync::{OwnedMutexGuard, Semaphore, SemaphorePermit},
+    task::spawn_blocking,
     time::sleep,
 };
 
@@ -77,14 +79,7 @@ impl Repo {
         fs::create_dir_all(&jobs_dir)?;
         fs::create_dir_all(&gens_dir)?;
         let gens = adopt(&gens_dir)?;
-        for generation in &gens {
-            spawn(measure(Arc::clone(generation)));
-        }
-        for pair in gens.windows(2) {
-            if let [older, newer] = pair {
-                spawn(measure_own(Arc::clone(older), Arc::clone(newer)));
-            }
-        }
+        spawn(measure(gens.clone()));
         let metrics_file = state_dir.join(&name).join("metrics.jsonl");
         let status = Status {
             state: if gens.is_empty() { State::Empty } else { State::Ready },
@@ -336,12 +331,8 @@ impl Repo {
             let phases = clock.into_phases();
             match built {
                 Ok(generation) => {
-                    let generation = Arc::new(generation);
-                    spawn(measure(Arc::clone(&generation)));
-                    if let Some(previous) = self.current() {
-                        spawn(measure_own(previous, Arc::clone(&generation)));
-                    }
-                    self.gens().push(generation);
+                    self.gens().push(Arc::new(generation));
+                    spawn(measure(self.gens().clone()));
                     self.set_status(State::Ready, &head, None, phases);
                 }
                 Err(err) => {
@@ -611,12 +602,6 @@ struct Part {
     bytes: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct FileMeta {
-    size: u64,
-    mtime: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct GenView {
     sha: String,
@@ -722,59 +707,73 @@ async fn installed_slapslop() -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|line| !line.is_empty())
 }
 
-async fn measure_own(older: Arc<Gen>, newer: Arc<Gen>) {
-    match own_parts(&older.dir, &newer.dir).await {
-        Ok(parts) => {
-            older.own_bytes.store(parts.values().sum(), Ordering::Relaxed);
-            *older.own_parts.lock().unwrap_or_else(PoisonError::into_inner) = parts;
-        }
-        Err(err) => eprintln!("warmd: comparing {} with {}: {err:#}", older.sha, newer.sha),
+async fn measure(gens: Vec<Arc<Gen>>) {
+    match spawn_blocking(move || measure_blocks(&gens)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => eprintln!("warmd: measuring generations: {err:#}"),
+        Err(err) => eprintln!("warmd: measuring generations: {err}"),
     }
 }
 
-async fn own_parts(older: &Path, newer: &Path) -> anyhow::Result<Parts> {
-    let (old_files, new_files) = (file_index(older).await?, file_index(newer).await?);
-    Ok(bucketize(old_files.iter().filter(|(path, meta)| new_files.get(*path) != Some(*meta))))
-}
-
-fn bucketize<'a>(files: impl Iterator<Item = (&'a String, &'a FileMeta)>) -> Parts {
-    let mut parts = Parts::new();
-    for (path, meta) in files {
-        *parts
-            .entry(if path.starts_with("target/slapslop/") {
-                "slapslop"
-            } else if path.starts_with("target/release/") {
-                "release"
-            } else if path.starts_with("target/") {
-                "cargo"
-            } else {
-                "source"
-            })
-            .or_default() += meta.size;
+fn measure_blocks(gens: &[Arc<Gen>]) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    for (index, generation) in gens.iter().rev().enumerate() {
+        let mut parts = Parts::new();
+        walk_files(&generation.dir, &mut |relative, path| {
+            for extent in fiemap(path)? {
+                match extent {
+                    Ok(extent) => {
+                        if seen.insert(extent.fe_physical) || extent.fe_physical == 0 {
+                            *parts.entry(part_of(relative)).or_default() += extent.fe_length;
+                        }
+                    }
+                    Err(err) if err.kind() == ErrorKind::Unsupported => {
+                        *parts.entry(part_of(relative)).or_default() += fs::metadata(path)?.len();
+                        break;
+                    }
+                    Err(err) => return Err(err).with_context(|| format!("mapping {}", path.display())),
+                }
+            }
+            Ok(())
+        })?;
+        let total = parts.values().sum();
+        let (bytes, target) = if index == 0 {
+            (&generation.bytes, &generation.parts)
+        } else {
+            (&generation.own_bytes, &generation.own_parts)
+        };
+        bytes.store(total, Ordering::Relaxed);
+        *target.lock().unwrap_or_else(PoisonError::into_inner) = parts;
     }
-    parts
+    Ok(())
 }
 
-async fn file_index(dir: &Path) -> anyhow::Result<HashMap<String, FileMeta>> {
-    Ok(checked_quiet(Command::new("find").arg(dir).args(["-type", "f", "-printf", "%P\\t%s\\t%T@\\n"]))
-        .await?
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split('\t');
-            let path = fields.next()?.to_owned();
-            Some((path, FileMeta { size: fields.next()?.parse().ok()?, mtime: fields.next()?.to_owned() }))
-        })
-        .collect())
-}
-
-async fn measure(generation: Arc<Gen>) {
-    match file_index(&generation.dir).await {
-        Ok(files) => {
-            let parts = bucketize(files.iter());
-            generation.bytes.store(parts.values().sum(), Ordering::Relaxed);
-            *generation.parts.lock().unwrap_or_else(PoisonError::into_inner) = parts;
+fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path, &Path) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let mut dirs = vec![root.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() {
+                let path = entry.path();
+                visit(path.strip_prefix(root).unwrap_or(&path), &path)?;
+            }
         }
-        Err(err) => eprintln!("warmd: measuring {}: {err:#}", generation.dir.display()),
+    }
+    Ok(())
+}
+
+fn part_of(relative: &Path) -> &'static str {
+    if relative.starts_with("target/slapslop") {
+        "slapslop"
+    } else if relative.starts_with("target/release") {
+        "release"
+    } else if relative.starts_with("target") {
+        "cargo"
+    } else {
+        "source"
     }
 }
 
@@ -791,7 +790,7 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
         let broken_file = gens_dir.join(format!("{sha}.broken.json"));
         let broken = if broken_file.exists() { from_slice(&fs::read(&broken_file)?)? } else { Broken::new() };
         let tool = fs::read_to_string(gens_dir.join(format!("{sha}.tool"))).ok().filter(|tool| !tool.is_empty());
-        let born = fs::metadata(&path)?.modified()?;
+        let born = fs::metadata(&dir)?.created()?;
         gens.push(Arc::new(Gen {
             sha: sha.to_owned(),
             dir,
