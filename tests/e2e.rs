@@ -25,6 +25,12 @@ const CLIPPY: &str = r#"  { name = "clippy", cmd = "cargo clippy --all-targets -
 const STUCK_CLIPPY: &str = r#"  { name = "clippy", cmd = "cargo clippy --all-targets --message-format=json -- -D warnings", on_patch = "sleep 600" },
 "#;
 
+const TESTS: &str = r#"  { name = "fmt", cmd = "cargo fmt --check" },
+  { name = "test", cmd = "cargo test -p {package} -- {tests}", on_main = "cargo test --no-run", test = true },
+"#;
+
+const TWO_TESTS: &str = "printf '\n#[test]\nfn adds() {\n    assert_eq!(add(1, 2), 3);\n}\n\n#[test]\nfn breaks() {\n    assert_eq!(add(1, 2), 4);\n}\n' >> src/lib.rs";
+
 const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs";
 
 struct Warmd {
@@ -428,4 +434,29 @@ fn spreads_checks_to_remotes_and_requeues_when_one_drops() {
     assert_eq!(again["result"]["remote"], fresh_addr, "{again:#}");
     assert_eq!(again["result"]["session_reused"], true, "the branch went back to its warm session: {again:#}");
     drop(fresh);
+}
+
+#[test]
+fn runs_only_the_named_tests_of_a_package() {
+    let root = demo_root("tests");
+    let warmd = Warmd::serve(root.clone(), &root, "", TESTS, &[]);
+    let patch = warmd.diff(TWO_TESTS);
+    let base = json!({ "sha": warmd.head() });
+    let check = warmd.job("check", &json!({ "repo": "demo", "base": base, "patch": patch }));
+    assert_eq!(names(&check["result"]["jobs"]), ["fmt"], "a check never runs tests: {check:#}");
+
+    let test = format!("{}/test", warmd.url);
+    let whole = json!({ "repo": "demo", "base": base, "patch": patch, "tests": { "package": "demo", "names": [] } });
+    assert!(curl("POST", &test, Some(&whole)).is_none(), "a run without test names is refused");
+    let via_check =
+        json!({ "repo": "demo", "base": base, "patch": patch, "tests": { "package": "demo", "names": ["adds"] } });
+    assert!(curl("POST", &format!("{}/check", warmd.url), Some(&via_check)).is_none(), "tests only go through /test");
+
+    let job = warmd.job("test", &via_check);
+    let ran = &job["result"]["jobs"];
+    assert_eq!(names(ran), ["test"], "{job:#}");
+    assert_eq!(ran[0]["exit"], 0, "{job:#}");
+    let output = ran[0]["output"].as_str().unwrap();
+    assert!(output.contains("test adds ... ok"), "{output}");
+    assert!(!output.contains("breaks"), "only the named test ran: {output}");
 }

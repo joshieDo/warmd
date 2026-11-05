@@ -32,6 +32,7 @@ jobs = [
   { name = "clippy-non-test", bins_only = true, cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --enable no_docs --disable decorative_comment_divider,narrator_comment', on_main = 'cargo-slapslop run "$PWD" --all-lints --enable no_docs --disable decorative_comment_divider,narrator_comment', slapslop = true },
   { name = "fmt", cmd = "cargo fmt --all --check", on_patch = "cargo fmt --check {touched}" },
+  { name = "test", cmd = "cargo test --locked -p {package} -- {tests}", on_main = "cargo test --locked --workspace --no-run", test = true },
 ]
 
 [repos.warmd]
@@ -42,6 +43,7 @@ jobs = [
   { name = "clippy-non-test", bins_only = true, cmd = "cargo clippy --bins --all-features --locked --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1', on_main = 'cargo-slapslop run "$PWD"', args = "--all-lints --enable no_docs", slapslop = true },
   { name = "fmt", cmd = "cargo fmt --check", on_patch = "cargo fmt --check {touched}" },
+  { name = "test", cmd = "cargo test --locked -p {package} -- {tests}", on_main = "cargo test --locked --no-run", test = true },
 ]
 
 [repos.evm2]

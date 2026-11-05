@@ -22,6 +22,8 @@ use crate::{
 
 const TAIL_BYTES: usize = 4000;
 
+const BOTH_BYTES: usize = 512 * 1024;
+
 const MOUNT_ATTEMPTS: u32 = 10;
 
 const MOUNT_RETRY: Duration = Duration::from_millis(50);
@@ -248,12 +250,12 @@ impl Output {
         matches!(self.code, Some(0))
     }
 
+    pub(crate) fn both(&self) -> String {
+        format!("== stdout\n{}\n== stderr\n{}", tail_of(&self.stdout, BOTH_BYTES), tail_of(&self.stderr, BOTH_BYTES))
+    }
+
     pub(crate) fn tail(&self) -> String {
-        let text = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
-        let start = (text.len().saturating_sub(TAIL_BYTES)..text.len())
-            .find(|&index| text.is_char_boundary(index))
-            .unwrap_or(text.len());
-        text.get(start..).unwrap_or_default().to_owned()
+        tail_of(if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr }, TAIL_BYTES)
     }
 }
 
@@ -302,4 +304,14 @@ fn timed(cmd: &str) -> String {
 fn shell_secs(text: &str) -> Option<f64> {
     let (minutes, seconds) = text.strip_suffix('s')?.split_once('m')?;
     Some(minutes.parse::<f64>().ok()?.mul_add(60.0, seconds.parse::<f64>().ok()?))
+}
+
+fn tail_of(text: &str, limit: usize) -> String {
+    text.get(
+        (text.len().saturating_sub(limit)..text.len())
+            .find(|&index| text.is_char_boundary(index))
+            .unwrap_or(text.len())..,
+    )
+    .unwrap_or_default()
+    .to_owned()
 }

@@ -454,7 +454,7 @@ impl Repo {
         let mut baseline = Baseline::new();
         let mut broken = Broken::new();
         lanes::run(sandbox, cfg.jobs.iter().map(|job| (job, job.main_cmd())).collect(), clock, |job, out, found| {
-            if !out.ok() && found.is_empty() {
+            if !out.ok() && found.is_empty() && !job.test {
                 broken.insert(job.name.clone(), out.tail());
                 return Ok(());
             }

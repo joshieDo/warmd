@@ -7,6 +7,7 @@ url=${WARMD_URL:-http://dev-joshie.tail388b2e.ts.net:7878}
 usage() {
   cat >&2 <<'EOF'
 usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON]
+       warmd test -p PACKAGE TEST...   (those tests on a warm build; prints their stdout and stderr, exits with their code)
        warmd track [JOB_ID]
        warmd hits [REPO] [JOB]
        warmd remote [ls | add IP:PORT | rm IP:PORT]
@@ -57,7 +58,7 @@ wait_job() {
 show_jobs() {
   jq -r --argjson shown "$3" "$2 | .[] | select(.name as \$n | \$shown | index(\$n) | not) | select((.new | length) > 0 or .output != null) |
     \"== \\(.name)\\n\" + (.new | map(.rendered) | join(\"\")) + (.output // \"\")" <<<"$1" >&3
-  jq -r --argjson shown "$3" "$2 | .[] | select(.name as \$n | \$shown | index(\$n) | not) | \"warmd: \\(.name) \" + (if (.new | length) == 0 and .output == null then \"ok\" else \"\\(.new | length) new finding(s)\" + (if .output then \", interrupted\" else \"\" end) end)" <<<"$1" >&2
+  jq -r --argjson shown "$3" "$2 | .[] | select(.name as \$n | \$shown | index(\$n) | not) | \"warmd: \\(.name) \" + (if .test then \"exited \\(.exit // \"?\")\" elif (.new | length) == 0 and .output == null then \"ok\" else \"\\(.new | length) new finding(s)\" + (if .output then \", interrupted\" else \"\" end) end)" <<<"$1" >&2
 }
 
 track() {
@@ -68,6 +69,9 @@ track() {
   if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
     jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
     return 1
+  fi
+  if jq -e '(.result.jobs | length) > 0 and (.result.jobs | all(.test))' <<<"$job" >/dev/null; then
+    return "$(jq -r '[.result.jobs[].exit // 1] | max' <<<"$job")"
   fi
   ok=$(jq -r .result.ok <<<"$job")
   jq -r '"warmd: summary: " + (.result.jobs | map(.name + " " + (if (.new | length) == 0 and .output == null then "ok" else "\(.new | length) new" + (if .output then ", interrupted" else "" end) end)) | join(", "))' <<<"$job" >&2
@@ -94,6 +98,7 @@ cmd=${1:-}
 [[ -n $cmd ]] || usage
 shift
 
+tests=null
 case $cmd in
   track)
     if [[ $# -gt 0 ]]; then
@@ -125,6 +130,11 @@ case $cmd in
     exit
     ;;
   check) ;;
+  test)
+    [[ ${1:-} == -p && $# -ge 3 ]] || usage
+    tests=$(jq -nc --arg package "$2" '{package: $package, names: $ARGS.positional}' --args "${@:3}")
+    set --
+    ;;
   *) usage ;;
 esac
 
@@ -162,14 +172,24 @@ git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
 done
 
 body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
-  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" \
-  '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip, only: $only }')
-ids=$(curl -fsS -X POST "$url/check" -H 'content-type: application/json' -d "$body")
+  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" --argjson tests "$tests" \
+  '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip, only: $only }
+   + (if $tests == null then {} else { tests: $tests } end)')
+endpoint=check
+[[ $cmd == test ]] && endpoint="test"
+if ! ids=$(curl -sS --fail-with-body -X POST "$url/$endpoint" -H 'content-type: application/json' -d "$body"); then
+  echo "warmd: $ids" >&2
+  exit 2
+fi
 id=$(jq -r .id <<<"$ids")
 full_id=$(jq -r '.full_id // empty' <<<"$ids")
 printf '%s %s\n' "$id" "$full_id" >"$(last_file)"
 
 echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}" >&2
+if [[ $cmd == test ]]; then
+  track "$id" "" >/dev/null
+  exit $?
+fi
 push_nudge
 echo "warmd: then get the result with: warmd track (job id on stdout)" >&2
 echo "$id${full_id:+ $full_id}"

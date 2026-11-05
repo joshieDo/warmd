@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    slice,
 };
 
 use anyhow::Context as _;
@@ -69,6 +70,8 @@ pub(crate) struct Job {
     pub(crate) bins_only: bool,
     #[serde(default)]
     pub(crate) benches_only: bool,
+    #[serde(default)]
+    pub(crate) test: bool,
 }
 
 impl Job {
@@ -91,6 +94,18 @@ impl Job {
             },
         );
         if template.contains("{args}") { template.replace("{args}", &args) } else { format!("{template} {args}") }
+    }
+
+    pub(crate) fn wanted(&self, tests: bool, only: &[String], skip: &[String], jobs: &[Self]) -> bool {
+        if tests || self.test {
+            return tests && self.test;
+        }
+        !skip.iter().any(|key| self.answers_to(key, jobs))
+            && (only.is_empty() || only.iter().any(|key| self.answers_to(key, jobs)))
+    }
+
+    pub(crate) fn runs_named_tests(&self) -> bool {
+        self.test && self.cmd.contains("{package}") && self.cmd.contains("{tests}")
     }
 
     pub(crate) fn answers_to(&self, key: &str, jobs: &[Self]) -> bool {
@@ -141,6 +156,34 @@ impl Step {
             Self::Clippy { targets, .. } if targets.contains("--lib --bins") => "full:clippy-non-test".to_owned(),
             Self::Clippy { .. } => "full:clippy".to_owned(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Tests {
+    package: String,
+    names: Vec<String>,
+}
+
+impl Tests {
+    pub(crate) fn problem(&self) -> Option<String> {
+        if self.package.is_empty()
+            || !self.package.chars().all(|char| char.is_ascii_alphanumeric() || char == '-' || char == '_')
+        {
+            return Some(format!("package {:?} is not a package name", self.package));
+        }
+        if self.names.is_empty() {
+            return Some("name the tests to run: workspace or whole-package runs are refused".to_owned());
+        }
+        self.names
+            .iter()
+            .find(|name| name.trim().is_empty() || name.starts_with('-'))
+            .map(|name| format!("test name {name:?} is empty or looks like a flag"))
+    }
+
+    pub(crate) fn fill(&self, cmd: &str) -> String {
+        cmd.replace("{package}", &quote_all(slice::from_ref(&self.package))).replace("{tests}", &quote_all(&self.names))
     }
 }
 

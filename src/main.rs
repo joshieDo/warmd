@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::{
     balance::{Balancer, Pending, Source},
     check::{Outcome, Request},
-    config::{Config, Profile},
+    config::{Config, Job as JobCfg, Profile},
     metrics::{Clock, Phase, RETAIN_SECS, with_commands},
     repo::{Repo, View},
     stats::{Machine, now_secs},
@@ -215,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(page))
         .route("/stats", get(stats_view))
         .route("/check", post(submit))
+        .route("/test", post(submit_tests))
         .route("/slapslop/baseline", post(slapslop_baseline))
         .route("/jobs/{id}", get(job))
         .route("/repos/{name}", get(repo_view))
@@ -231,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn submit(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
+    if req.tests().is_some() {
+        return Err((StatusCode::BAD_REQUEST, "tests go to POST /test".to_owned()));
+    }
     let repo = app.repo(req.repo())?;
     if req.wants_full() {
         let (ci, full) = req.split_full();
@@ -378,6 +382,23 @@ async fn capacity(State(app): State<Arc<App>>) -> Json<Value> {
         .map(|(name, repo)| (name, json!({ "built": repo.current().is_some(), "free": repo.free_slots() })))
         .collect::<Map<_, _>>();
     Json(json!({ "repos": repos }))
+}
+
+async fn submit_tests(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
+    let repo = app.repo(req.repo())?;
+    let Some(tests) = req.tests() else {
+        return Err((StatusCode::BAD_REQUEST, "name tests: {\"package\": .., \"names\": [..]}".to_owned()));
+    };
+    if let Some(problem) = tests.problem() {
+        return Err((StatusCode::BAD_REQUEST, problem));
+    }
+    if !repo.cfg().jobs.iter().any(JobCfg::runs_named_tests) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{} has no test job with {{package}} and {{tests}} in its cmd", repo.name()),
+        ));
+    }
+    Ok(Json(json!({ "id": start(&app, &repo, req.only_tests()) })))
 }
 
 async fn slapslop_baseline(app: State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {

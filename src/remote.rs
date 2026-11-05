@@ -45,7 +45,11 @@ pub(crate) async fn run(app: &App, addr: &str, req: &Request, lease: Duration, p
     let id = match call(
         addr,
         "POST",
-        if req.kind() == "slapslop_baseline" { "/slapslop/baseline" } else { "/check" },
+        match req.kind() {
+            "slapslop_baseline" => "/slapslop/baseline",
+            "test" => "/test",
+            _ => "/check",
+        },
         Some(req),
     )
     .await

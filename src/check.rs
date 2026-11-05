@@ -9,7 +9,7 @@ use serde_json::{Value, from_str, json};
 use tokio::fs::{create_dir_all, read_to_string, write};
 
 use crate::{
-    config::{ArgsOverride, FULL_CLIPPY, Profile, Step},
+    config::{ArgsOverride, FULL_CLIPPY, Profile, Step, Tests},
     diag::{self, Diag},
     lanes,
     metrics::{self, Clock, Phase},
@@ -58,6 +58,7 @@ pub(crate) struct Request {
     skip: Vec<String>,
     #[serde(default)]
     only: Vec<String>,
+    tests: Option<Tests>,
     #[serde(skip)]
     baseline_only: bool,
     #[serde(skip)]
@@ -72,6 +73,8 @@ impl Request {
     pub(crate) const fn kind(&self) -> &'static str {
         if self.baseline_only {
             "slapslop_baseline"
+        } else if self.tests.is_some() {
+            "test"
         } else if self.full_only {
             "full"
         } else {
@@ -91,7 +94,16 @@ impl Request {
             "patch_lines": self.patch.lines().count(),
             "patch_files": changed_files(&self.patch).len(),
             "slapslop_baseline": self.slapslop_baseline.is_some(),
+            "tests": self.tests,
         })
+    }
+
+    pub(crate) const fn tests(&self) -> Option<&Tests> {
+        self.tests.as_ref()
+    }
+
+    pub(crate) fn only_tests(self) -> Self {
+        Self { full: false, fix: false, ..self }
     }
 
     pub(crate) fn branch(&self) -> Option<&str> {
@@ -213,6 +225,8 @@ struct JobResult {
     new: Vec<Diag>,
     output: Option<String>,
     custom_args: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    test: bool,
     rebuilt: Option<u32>,
     cpu_secs: Option<f64>,
 }
@@ -520,22 +534,18 @@ async fn check(
     } else {
         all_jobs
             .iter()
-            .filter(|job| {
-                req.skip.iter().any(|key| job.answers_to(key, all_jobs))
-                    || !(req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
-            })
+            .filter(|job| req.tests.is_none() && !job.test && !job.wanted(false, &req.only, &req.skip, all_jobs))
             .map(|job| job.name.clone())
             .collect()
     };
     let mut planned = Vec::with_capacity(all_jobs.len());
-    for job in all_jobs.iter().filter(|job| {
-        !req.full_only
-            && !req.skip.iter().any(|key| job.answers_to(key, all_jobs))
-            && (req.only.is_empty() || req.only.iter().any(|key| job.answers_to(key, all_jobs)))
-    }) {
+    for job in
+        all_jobs.iter().filter(|job| !req.full_only && job.wanted(req.tests.is_some(), &req.only, &req.skip, all_jobs))
+    {
         if (job.bins_only && !scope.whole && !scope.bins_touched)
             || (job.benches_only && !scope.whole && !scope.benches_touched)
-            || generation.broken().contains_key(&job.name)
+            || (job.test && !job.runs_named_tests())
+            || (!job.test && generation.broken().contains_key(&job.name))
         {
             continue;
         }
@@ -561,7 +571,11 @@ async fn check(
                     .args
                     .get(&job.name)
                     .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
-                (job, job.render(&template, custom))
+                let cmd = job.render(&template, custom);
+                match req.tests.as_ref() {
+                    Some(tests) if job.test => (job, tests.fill(&cmd)),
+                    Some(_) | None => (job, cmd),
+                }
             })
             .collect(),
         clock,
@@ -570,7 +584,7 @@ async fn check(
                 .args
                 .get(&job.name)
                 .or_else(|| req.args.iter().find(|(key, _)| job.answers_to(key, all_jobs)).map(|(_, over)| over));
-            let output = (!out.ok() && found.is_empty()).then(|| out.tail());
+            let output = if job.test { Some(out.both()) } else { (!out.ok() && found.is_empty()).then(|| out.tail()) };
             let new = if custom.is_some() {
                 found.retain(|hit| added.get(&hit.file).is_some_and(|lines| lines.contains(&hit.line)));
                 found
@@ -583,6 +597,7 @@ async fn check(
                 new,
                 output,
                 custom_args: custom.is_some(),
+                test: job.test,
                 rebuilt: diag::rebuilt(&out.stdout),
                 cpu_secs: out.cpu_secs,
             });
@@ -617,11 +632,14 @@ async fn check(
     } else {
         None
     };
-    let ok = jobs.iter().all(|job| job.new.is_empty() && job.output.is_none());
+    let ok = jobs.iter().filter(|job| !job.test).all(|job| job.new.is_empty() && job.output.is_none());
     let ran_on = generation.sha().to_owned();
     Ok(Outcome::Checked(Report {
         ok,
-        ok_precise: jobs.iter().all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none()),
+        ok_precise: jobs
+            .iter()
+            .filter(|job| !job.test)
+            .all(|job| job.new.iter().all(|hit| hit.hazy) && job.output.is_none()),
         session_reused,
         ran_on,
         rebased_from,
