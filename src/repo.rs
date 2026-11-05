@@ -63,28 +63,6 @@ pub(crate) struct Repo {
     cache_bytes: AtomicU64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct SessionView {
-    name: String,
-    bytes: Option<u64>,
-    idle_secs: u64,
-    expires_in_secs: u64,
-    on_main: bool,
-}
-
-impl SessionView {
-    fn of(name: String, meta: &Value, idle: Duration, main: Option<&String>) -> Self {
-        let idle_secs = now_secs().saturating_sub(meta["used_at"].as_u64().unwrap_or_default());
-        Self {
-            name: meta["session"].as_str().map_or(name, str::to_owned),
-            bytes: meta["bytes"].as_u64(),
-            idle_secs,
-            expires_in_secs: idle.as_secs().saturating_sub(idle_secs),
-            on_main: main.is_some_and(|sha| meta["gen"] == sha.as_str()),
-        }
-    }
-}
-
 impl Repo {
     pub(crate) async fn open(
         name: String,
@@ -268,7 +246,10 @@ impl Repo {
     /// When `sha` is main's head but not built yet (its build may be running), builds it first, so a check on the newest
     /// main runs on it instead of rebasing onto the build before (and starting its branch cold twice).
     pub(crate) async fn catch_up_to(&self, sha: &str) -> anyhow::Result<()> {
-        if self.find(sha).is_none() && self.remote_head().await? == sha {
+        if self.find(sha).is_some() {
+            return Ok(());
+        }
+        if self.remote_head().await? == sha {
             self.refresh(self.keep, false).await?;
         }
         Ok(())
@@ -595,6 +576,28 @@ pub(crate) struct View {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SessionView {
+    name: String,
+    bytes: Option<u64>,
+    idle_secs: u64,
+    expires_in_secs: u64,
+    on_main: bool,
+}
+
+impl SessionView {
+    fn of(name: String, meta: &Value, idle: Duration, main: Option<&String>) -> Self {
+        let idle_secs = now_secs().saturating_sub(meta["used_at"].as_u64().unwrap_or_default());
+        Self {
+            name: meta["session"].as_str().map_or(name, str::to_owned),
+            bytes: meta["bytes"].as_u64(),
+            idle_secs,
+            expires_in_secs: idle.as_secs().saturating_sub(idle_secs),
+            on_main: main.is_some_and(|sha| meta["gen"] == sha.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct Part {
     jobs: Vec<String>,
     bytes: u64,
@@ -657,6 +660,15 @@ pub(crate) async fn dir_bytes(path: &Path) -> anyhow::Result<u64> {
         .parse()?)
 }
 
+pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
+    if symlink_metadata(path).await.is_err() {
+        return Ok(());
+    }
+    checked_quiet(Command::new("chmod").arg("-R").arg("u+rwX").arg(path)).await?;
+    checked_quiet(Command::new("rm").arg("-rf").arg(path)).await?;
+    Ok(())
+}
+
 /// Clears a repo's jobs dir after a restart but keeps its sessions (a branch's warm build), so a deploy costs no warmth.
 async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     let mut kept = HashMap::new();
@@ -700,15 +712,6 @@ fn session_key(name: &str) -> String {
 async fn installed_slapslop() -> Option<String> {
     let out = Command::new("cargo-slapslop").arg("--version").output().await.ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|line| !line.is_empty())
-}
-
-pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
-    if symlink_metadata(path).await.is_err() {
-        return Ok(());
-    }
-    checked_quiet(Command::new("chmod").arg("-R").arg("u+rwX").arg(path)).await?;
-    checked_quiet(Command::new("rm").arg("-rf").arg(path)).await?;
-    Ok(())
 }
 
 async fn measure_own(older: Arc<Gen>, newer: Arc<Gen>) {

@@ -34,6 +34,8 @@ const RESULTS: &str = "/tmp/warmd-results";
 /// The line a lanes run prints when a job finished, before the job's index.
 const DONE_MARK: &str = "warmd-done:";
 
+const TIMES_MARK: &str = "warmd-cpu:";
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sandbox<'a> {
     pub(crate) repo: &'a str,
@@ -105,8 +107,16 @@ impl Sandbox<'_> {
             Tree::Overlay { lower, upper, work: overlay_work } => {
                 bwrap.arg("--tmpfs").arg(&home);
                 bwrap.arg("--ro-bind").arg(&rustup_home).arg(&rustup_home);
-                for tools in [home.join(".local/bin"), home.join(".local/share/slapslop")] {
-                    bwrap.arg("--ro-bind-try").arg(&tools).arg(&tools);
+                // The tools on PATH under the home the tmpfs hides (slapslop installed outside ~/.local in CI).
+                let on_path =
+                    env::var_os("PATH").map(|path| env::split_paths(&path).collect::<Vec<_>>()).unwrap_or_default();
+                let tools = [home.join(".local/bin"), home.join(".local/share/slapslop")].into_iter().chain(
+                    on_path.into_iter().filter(|dir| {
+                        dir.starts_with(&home) && !dir.starts_with(&cargo_home) && !dir.starts_with(&rustup_home)
+                    }),
+                );
+                for tool_dir in tools {
+                    bwrap.arg("--ro-bind-try").arg(&tool_dir).arg(&tool_dir);
                 }
                 for scratch in [&cargo_home, &cache] {
                     bwrap.arg("--overlay-src").arg(scratch).arg("--tmp-overlay").arg(scratch);
@@ -209,35 +219,6 @@ pub(crate) struct LaneJob<'job> {
     pub(crate) cmd: String,
 }
 
-/// One file a job of a lanes run wrote to its results directory.
-fn result(dir: &Path, index: usize, ext: &str) -> anyhow::Result<String> {
-    let file = dir.join(format!("{index}.{ext}"));
-    fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
-}
-
-/// The script of a lanes run: a background subshell per lane running its jobs in order, each job's stdout, stderr,
-/// exit status (and slapslop's hits) written to [`RESULTS`], then a [`DONE_MARK`] line with its index.
-fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
-    let mut script = String::new();
-    for lane in lanes {
-        script.push_str("(\n");
-        for LaneJob { index, job, cmd } in lane {
-            let at = format!("{RESULTS}/{index}");
-            if job.slapslop {
-                script.push_str(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl\n"));
-            }
-            script.push_str(&format!("( {} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
-            if job.slapslop {
-                script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
-            }
-            script.push_str(&format!("echo {DONE_MARK}{index}\n"));
-        }
-        script.push_str(") &\n");
-    }
-    script.push_str("wait\n");
-    script
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Tree<'a> {
     Build { dir: &'a Path, cache: &'a Path },
@@ -251,22 +232,6 @@ pub(crate) struct Output {
     pub(crate) stderr: String,
     /// User plus system CPU seconds of the command and everything it ran (the shell's `times`).
     pub(crate) cpu_secs: Option<f64>,
-}
-
-const TIMES_MARK: &str = "warmd-cpu:";
-
-/// The command, then its children's CPU times on stdout after a marker, keeping its exit status.
-fn timed(cmd: &str) -> String {
-    format!(
-        "{{ {cmd}
-}}; warmd_status=$?; printf '\n{TIMES_MARK}'; times; exit $warmd_status"
-    )
-}
-
-/// `1m2.500000s` as seconds.
-fn shell_secs(text: &str) -> Option<f64> {
-    let (minutes, seconds) = text.strip_suffix('s')?.split_once('m')?;
-    Some(minutes.parse::<f64>().ok()?.mul_add(60.0, seconds.parse::<f64>().ok()?))
 }
 
 impl Output {
@@ -296,4 +261,47 @@ impl Output {
 
 pub(crate) fn work_path(repo: &str) -> String {
     format!("/tmp/warmd/{repo}")
+}
+
+/// One file a job of a lanes run wrote to its results directory.
+fn result(dir: &Path, index: usize, ext: &str) -> anyhow::Result<String> {
+    let file = dir.join(format!("{index}.{ext}"));
+    fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
+}
+
+/// The script of a lanes run: a background subshell per lane running its jobs in order, each job's stdout, stderr,
+/// exit status (and slapslop's hits) written to [`RESULTS`], then a [`DONE_MARK`] line with its index.
+fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
+    let mut script = String::new();
+    for lane in lanes {
+        script.push_str("(\n");
+        for LaneJob { index, job, cmd } in lane {
+            let at = format!("{RESULTS}/{index}");
+            if job.slapslop {
+                script.push_str(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl\n"));
+            }
+            script.push_str(&format!("( {} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
+            if job.slapslop {
+                script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
+            }
+            script.push_str(&format!("echo {DONE_MARK}{index}\n"));
+        }
+        script.push_str(") &\n");
+    }
+    script.push_str("wait\n");
+    script
+}
+
+/// The command, then its children's CPU times on stdout after a marker, keeping its exit status.
+fn timed(cmd: &str) -> String {
+    format!(
+        "{{ {cmd}
+}}; warmd_status=$?; printf '\n{TIMES_MARK}'; times; exit $warmd_status"
+    )
+}
+
+/// `1m2.500000s` as seconds.
+fn shell_secs(text: &str) -> Option<f64> {
+    let (minutes, seconds) = text.strip_suffix('s')?.split_once('m')?;
+    Some(minutes.parse::<f64>().ok()?.mul_add(60.0, seconds.parse::<f64>().ok()?))
 }
