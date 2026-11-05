@@ -692,6 +692,10 @@ pub(crate) async fn remove_tree(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    checked(Command::new("git").arg("-C").arg(dir).args(args)).await
+}
+
 /// Clears a repo's jobs dir after a restart but keeps its sessions (a branch's warm build), so a deploy costs no warmth.
 async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     let mut kept = HashMap::new();
@@ -917,10 +921,6 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
     }
     gens.sort_by_key(|generation| generation.born);
     Ok(gens)
-}
-
-pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    checked(Command::new("git").arg("-C").arg(dir).args(args)).await
 }
 
 async fn checked(cmd: &mut Command) -> anyhow::Result<String> {

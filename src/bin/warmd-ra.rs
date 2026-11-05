@@ -28,7 +28,7 @@ use ra_ap_syntax::{AstNode as _, Edition, NodeOrToken, SourceFile, SyntaxKind, S
 use ra_ap_vfs::{Vfs, VfsPath};
 use serde_json::{Value, from_slice, from_str, json};
 
-const POOL: usize = 2;
+const POOL: usize = 4;
 
 const CHILD_THREADS: usize = 8;
 
@@ -238,12 +238,16 @@ impl Warm {
             let path = self.vfs.file_path(file).to_string();
             let path = path.strip_prefix(&format!("{}/", self.root)).unwrap_or(&path).to_owned();
             let mut on_main = self.baseline.get(&file).cloned().unwrap_or_default();
+            let mut shown = HashSet::new();
             for diag in diags.iter().filter(|diag| matches!(diag.severity, Severity::Error | Severity::Warning)) {
                 if let Some(seen) = on_main.iter().position(|old| *old == key(diag)) {
                     on_main.swap_remove(seen);
                     continue;
                 }
                 let at = lines.line_col(diag.range.range.start());
+                if !shown.insert(format!("{}:{}:{}", at.line, at.col, key(diag))) {
+                    continue;
+                }
                 found.push(json!({
                     "file": path, "line": at.line + 1, "col": at.col + 1, "severity": severity(diag.severity),
                     "code": diag.code.as_str(), "message": diag.message,
@@ -307,7 +311,7 @@ impl Warm {
         let mut busy: Vec<Busy> = Vec::new();
         let mut chunk = vec![0; 1 << 16];
         loop {
-            while idle.len() < POOL {
+            while busy.is_empty() && idle.len() < POOL {
                 idle.push(self.fork()?);
             }
             // SAFETY: waitpid with WNOHANG only reaps children that already exited.
@@ -325,7 +329,7 @@ impl Warm {
                 if poll.revents != 0 {
                     let read = job.reply.read(&mut chunk).unwrap_or_default();
                     job.got.extend_from_slice(chunk.get(..read).unwrap_or_default());
-                    if read == 0 {
+                    if read == 0 || job.got.ends_with(b"\n") {
                         job.pid = 0;
                     }
                 }

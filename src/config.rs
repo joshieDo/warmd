@@ -47,22 +47,20 @@ pub(crate) struct RepoCfg {
     pub(crate) ra: Option<RaCfg>,
 }
 
-/// Tier 1: rust-analyzer loaded at main, answering each check within a second, before the jobs.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RaCfg {
-    /// Prints cargo's JSON messages for build scripts and proc macros: a job's own command, so the gen's build is fresh.
-    pub(crate) build: String,
-    pub(crate) toolchain: Option<String>,
-    #[serde(default)]
-    pub(crate) all_features: bool,
-}
-
 impl RepoCfg {
     /// The slapslop jobs, each with what a main build runs.
     pub(crate) fn slapslop_main_cmds(&self) -> Vec<(&Job, String)> {
         self.jobs.iter().filter(|job| job.slapslop).map(|job| (job, job.main_cmd())).collect()
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RaCfg {
+    pub(crate) build: String,
+    pub(crate) toolchain: Option<String>,
+    #[serde(default)]
+    pub(crate) all_features: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
