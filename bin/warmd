@@ -29,13 +29,17 @@ push_nudge() {
 }
 
 wait_job() {
-  local job state shown='[]' pending
+  local job state shown='[]' pending tier1=0
   while :; do
     if ! job=$(curl -fsS "$url/jobs/$1" 2>/dev/null); then
       echo "warmd: job $1 is gone (warmd restarted, or the job is older than 4 days): run warmd check again" >&2
       return 1
     fi
     state=$(jq -r .state <<<"$job")
+    if [[ $tier1 == 0 ]] && jq -e .tier1 <<<"$job" >/dev/null; then
+      show_tier1 "$job"
+      tier1=1
+    fi
     [[ $state == "done" || $state == "failed" ]] && break
     if [[ $(jq '.progress.partial | length' <<<"$job") -gt $(jq length <<<"$shown") ]]; then
       show_jobs "$job" .progress.partial "$shown"
@@ -52,6 +56,12 @@ wait_job() {
     return 1
   fi
   printf '%s' "$job"
+}
+
+# Prints tier 1 (rust-analyzer on the warm main, about a second in): its diagnostics on stdout (fd 3), a status line on stderr.
+show_tier1() {
+  jq -r '.tier1.diagnostics // [] | .[] | "\(.file):\(.line):\(.col): \(.severity)[\(.code)]: \(.message)"' <<<"$1" >&3
+  jq -r '.tier1 | "warmd: tier1 (rust-analyzer) " + if .skipped then "skipped: \(.skipped)" elif .error then "failed: \(.error)" else "\(.diagnostics | length) new diagnostic(s) in \(.ms)ms; the jobs below decide" end' <<<"$1" >&2
 }
 
 # Prints the results of the jobs of the list at path not named in the shown JSON array: findings on stdout (fd 3), one status line each on stderr.

@@ -110,6 +110,10 @@ impl Request {
         self.branch.as_deref()
     }
 
+    pub(crate) fn patch(&self) -> &str {
+        &self.patch
+    }
+
     pub(crate) fn base_sha(&self) -> &str {
         &self.base.sha
     }

@@ -31,6 +31,10 @@ const TESTS: &str = r#"  { name = "fmt", cmd = "cargo fmt --check" },
 
 const TWO_TESTS: &str = "printf '\n#[test]\nfn adds() {\n    assert_eq!(add(1, 2), 3);\n}\n\n#[test]\nfn breaks() {\n    assert_eq!(add(1, 2), 4);\n}\n' >> src/lib.rs";
 
+const BAD_TYPE: &str = "printf '\npub fn bad() -> u32 {\n    \"x\"\n}\n' >> src/lib.rs";
+
+const USES_TWO: &str = "printf '\npub fn uses_two() -> bool {\n    two()\n}\n' >> src/lib.rs";
+
 const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs";
 
 struct Warmd {
@@ -459,4 +463,47 @@ fn runs_only_the_named_tests_of_a_package() {
     let output = ran[0]["output"].as_str().unwrap();
     assert!(output.contains("test adds ... ok"), "{output}");
     assert!(!output.contains("breaks"), "only the named test ran: {output}");
+}
+
+fn tier1(warmd: &Warmd, edit: &str) -> Value {
+    let body = json!({ "repo": "demo", "base": { "ref": "main", "sha": warmd.head() }, "patch": warmd.diff(edit) });
+    let id = curl("POST", &format!("{}/check", warmd.url), Some(&body)).unwrap()["id"].as_str().unwrap().to_owned();
+    let mut job = Value::Null;
+    until(|| {
+        job = warmd.get(&format!("/jobs/{id}"));
+        !job["tier1"].is_null()
+    });
+    job
+}
+
+#[test]
+fn tier1_answers_before_the_jobs_and_follows_main() {
+    let root = demo_root("tier1");
+    let channel =
+        include_str!("../rust-toolchain.toml").lines().find_map(|line| line.strip_prefix("channel = ")).unwrap();
+    let top = format!(
+        "[repos.demo.ra]\nbuild = \"cargo check --all-targets --message-format=json\"\ntoolchain = {channel}\n"
+    );
+    let warmd = Warmd::serve(root.clone(), &root, &top, STUCK_CLIPPY, &[]);
+    until(|| warmd.repo()["tier1"]["state"] != "loading");
+    assert_eq!(warmd.repo()["tier1"]["state"], "ready", "{:#}", warmd.repo());
+
+    let job = tier1(&warmd, BAD_TYPE);
+    assert_eq!(job["state"], "running", "{job:#}");
+    let found = &job["tier1"]["diagnostics"];
+    assert_eq!(codes(found), ["E0308"], "{job:#}");
+    assert_eq!(found[0]["file"], "src/lib.rs");
+    assert_eq!(found[0]["line"], 6);
+    assert_eq!(tier1(&warmd, FIRST)["tier1"]["diagnostics"], json!([]));
+
+    sh(
+        &root.join("demo"),
+        "printf '\npub fn two() -> u32 {\n    2\n}\n' >> src/lib.rs && git -c user.name=t -c user.email=t@t commit -qam two && git push -q ../demo.git main",
+    );
+    let head = warmd.head();
+    curl("POST", &format!("{}/repos/demo/refresh", warmd.url), None).unwrap();
+    until(|| warmd.repo()["tier1"]["sha"] == head.as_str());
+    assert_eq!(warmd.repo()["tier1"]["state"], "ready");
+    let job = tier1(&warmd, USES_TWO);
+    assert_eq!(codes(&job["tier1"]["diagnostics"]), ["E0308"], "{job:#}");
 }

@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::{
     config::Job,
     diag::{self, Diag},
-    metrics,
+    metrics, ra,
 };
 
 const TAIL_BYTES: usize = 4000;
@@ -66,7 +66,7 @@ impl Sandbox<'_> {
     }
 
     async fn run_once(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
-        let mut child = self.spawn(cmd, None, stdin.is_some()).await?;
+        let mut child = self.spawn(cmd, None, stdin.is_some(), None).await?;
         if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
             pipe.write_all(text.as_bytes()).await?;
         }
@@ -79,9 +79,21 @@ impl Sandbox<'_> {
         })
     }
 
+    /// Starts a long-running tool in the tree, its directory bound read-only and `vars` set, stdin and stdout piped.
+    pub(crate) async fn serve(self, tool: &Path, vars: &[(&str, &str)]) -> anyhow::Result<Child> {
+        let cmd = format!("exec '{}'", tool.display().to_string().replace('\'', "'\\''"));
+        self.spawn(&cmd, None, true, Some((ra::tool_dir(tool)?, vars))).await
+    }
+
     /// Starts bwrap running `cmd` in the tree, with `results` (a host directory) bound at [`RESULTS`] when given,
-    /// stdout and stderr piped, and stdin piped when `stdin`.
-    async fn spawn(self, cmd: &str, results: Option<&Path>, stdin: bool) -> anyhow::Result<Child> {
+    /// stdout and stderr piped, stdin piped when `stdin`, and a tool's directory bound with its variables set.
+    async fn spawn(
+        self,
+        cmd: &str,
+        results: Option<&Path>,
+        stdin: bool,
+        tool: Option<(&Path, &[(&str, &str)])>,
+    ) -> anyhow::Result<Child> {
         let home = env::var_os("HOME").map(PathBuf::from).context("HOME is unset")?;
         let cargo_home = env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
         let rustup_home = env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
@@ -130,6 +142,12 @@ impl Sandbox<'_> {
         if let Some(dir) = results {
             bwrap.arg("--bind").arg(dir).arg(RESULTS);
         }
+        if let Some((dir, vars)) = tool {
+            bwrap.arg("--ro-bind").arg(dir).arg(dir);
+            for (name, value) in vars {
+                bwrap.args(["--setenv", name, value]);
+            }
+        }
         bwrap.args(["--chdir", &work, "sh", "-c", cmd]);
         bwrap.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
         bwrap.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -148,7 +166,7 @@ impl Sandbox<'_> {
         create_dir_all(&dir).await?;
         let result = async {
             for attempt in 1..=MOUNT_ATTEMPTS {
-                let mut child = self.spawn(&lanes_script(lanes), Some(&dir), false).await?;
+                let mut child = self.spawn(&lanes_script(lanes), Some(&dir), false, None).await?;
                 let mut lines = BufReader::new(child.stdout.take().context("bwrap stdout")?).lines();
                 let mut finished = 0;
                 while let Some(line) = lines.next_line().await? {

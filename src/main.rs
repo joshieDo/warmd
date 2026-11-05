@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, from_str, json, to_value};
 use tokio::{
     fs::{read_to_string, write},
+    join,
     net::TcpListener,
     select,
     signal::unix::{SignalKind, signal},
@@ -51,6 +52,7 @@ mod diag;
 mod hits_view;
 mod lanes;
 mod metrics;
+mod ra;
 mod remote;
 mod repo;
 mod sandbox;
@@ -117,6 +119,7 @@ struct App {
     keep: Duration,
     machine: Machine,
     state_dir: PathBuf,
+    tier1: Mutex<HashMap<Uuid, (u64, Value)>>,
 }
 
 impl App {
@@ -133,6 +136,11 @@ impl App {
         let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         jobs.retain(|_, (at, _)| *at >= now.saturating_sub(RETAIN_SECS));
         jobs.insert(id, (now, job));
+        drop(jobs);
+        self.tier1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, (at, _)| *at >= now.saturating_sub(RETAIN_SECS));
     }
 
     async fn reload(&self) -> anyhow::Result<()> {
@@ -199,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
         keep,
         machine: Machine::default(),
         state_dir: config.state_dir.clone(),
+        tier1: Mutex::default(),
     });
     let reloader = Arc::clone(&app);
     let mut hangups = signal(SignalKind::hangup())?;
@@ -308,7 +317,17 @@ async fn run_local(app: &Arc<App>, repo: &Arc<Repo>, id: Uuid, req: Request) {
         app.update_live(id, |entry| entry.running_since = Some(now_secs()));
     };
     let progress = |value| app.set(id, Job::Running { progress: Some(value) });
-    let (outcome, phases) = with_commands(check::run(repo, &app.full, req, &layer, running, progress)).await;
+    let patch = (req.kind() == "check" && !req.patch().trim().is_empty())
+        .then(|| (req.base_sha().to_owned(), req.patch().to_owned()));
+    let tier1 = async {
+        if let Some((base, patch)) = patch
+            && let Some(found) = repo.tier1().check(&base, &patch).await
+        {
+            app.tier1.lock().unwrap_or_else(PoisonError::into_inner).insert(id, (now_secs(), found));
+        }
+    };
+    let ((outcome, phases), ()) =
+        join!(with_commands(check::run(repo, &app.full, req, &layer, running, progress)), tier1);
     app.live.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
     app.finish(id, outcome.map(Done::Check), phases);
 }
@@ -424,13 +443,19 @@ async fn refresh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply
     Ok(Json(json!({ "id": id })))
 }
 
-async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Job> {
-    app.jobs
+async fn job(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Reply<Value> {
+    let job = app
+        .jobs
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&id)
-        .map(|(_, job)| Json(job.clone()))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))
+        .map(|(_, job)| job.clone())
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("no job {id}")))?;
+    let mut value = to_value(job).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    if let Some((_, tier1)) = app.tier1.lock().unwrap_or_else(PoisonError::into_inner).get(&id) {
+        value["tier1"] = tier1.clone();
+    }
+    Ok(Json(value))
 }
 
 async fn repo_view(State(app): State<Arc<App>>, Path(name): Path<String>) -> Reply<View> {

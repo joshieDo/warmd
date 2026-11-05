@@ -44,6 +44,18 @@ pub(crate) struct RepoCfg {
     pub(crate) jobs: Vec<Job>,
     #[serde(default = "default_clippy")]
     pub(crate) clippy: String,
+    pub(crate) ra: Option<RaCfg>,
+}
+
+/// Tier 1: rust-analyzer loaded at main, answering each check within a second, before the jobs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RaCfg {
+    /// Prints cargo's JSON messages for build scripts and proc macros: a job's own command, so the gen's build is fresh.
+    pub(crate) build: String,
+    pub(crate) toolchain: Option<String>,
+    #[serde(default)]
+    pub(crate) all_features: bool,
 }
 
 impl RepoCfg {

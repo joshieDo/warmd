@@ -31,6 +31,7 @@ use crate::{
     diag::{self, Diag},
     lanes,
     metrics::{self, Clock, Phase},
+    ra::Tier1,
     sandbox::{Sandbox, Tree},
     stats::now_secs,
 };
@@ -63,6 +64,7 @@ pub(crate) struct Repo {
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     session_views: Mutex<Vec<SessionView>>,
     cache_bytes: AtomicU64,
+    tier1: Tier1,
 }
 
 impl Repo {
@@ -114,7 +116,12 @@ impl Repo {
             sessions: Mutex::new(sessions),
             session_views: Mutex::default(),
             cache_bytes: AtomicU64::new(0),
+            tier1: Tier1::default(),
         })
+    }
+
+    pub(crate) const fn tier1(&self) -> &Tier1 {
+        &self.tier1
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -320,6 +327,7 @@ impl Repo {
             gens,
             sessions: self.session_views.lock().unwrap_or_else(PoisonError::into_inner).clone(),
             cache_bytes: Some(self.cache_bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes > 0),
+            tier1: self.tier1.view(),
         }
     }
 
@@ -361,6 +369,9 @@ impl Repo {
             }
         } else if let Some(current) = self.current().filter(|current| current.sha == head) {
             self.rescan(&current).await?;
+        }
+        if let Some(current) = self.current() {
+            self.tier1.follow(self, current, keep).await;
         }
         self.prune(keep).await
     }
@@ -562,6 +573,10 @@ impl Gen {
         &self.sha
     }
 
+    pub(crate) const fn born(&self) -> SystemTime {
+        self.born
+    }
+
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
@@ -586,6 +601,7 @@ pub(crate) struct View {
     gens: Vec<GenView>,
     sessions: Vec<SessionView>,
     cache_bytes: Option<u64>,
+    tier1: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -903,7 +919,7 @@ fn adopt(gens_dir: &Path) -> anyhow::Result<Vec<Arc<Gen>>> {
     Ok(gens)
 }
 
-async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     checked(Command::new("git").arg("-C").arg(dir).args(args)).await
 }
 
