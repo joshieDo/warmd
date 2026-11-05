@@ -108,6 +108,7 @@ impl Sandbox<'_> {
                 for shared in [&cargo_home, &rustup_home] {
                     bwrap.arg("--bind").arg(shared).arg(shared);
                 }
+                create_dir_all(&cache).await?;
                 bwrap.arg("--bind").arg(repo_cache).arg(&cache);
                 bwrap.arg("--bind").arg(dir).arg(&work);
             }
