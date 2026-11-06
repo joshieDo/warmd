@@ -100,6 +100,16 @@ pub(crate) async fn record(file: &Path, kind: &str, fields: Value, clock: &Clock
     }
 }
 
+pub(crate) async fn with_commands<F: Future>(future: F) -> F::Output {
+    COMMANDS.scope(RefCell::new(Vec::new()), future).await
+}
+
+pub(crate) fn note_command(cmd: &str) {
+    let short = cmd.chars().take(COMMAND_CHARS).collect::<String>();
+    // Commands outside a job (the main poll's ls-remote) have no timeline to join.
+    if let Err(_outside) = COMMANDS.try_with(|commands| commands.borrow_mut().push(short)) {}
+}
+
 async fn prune(file: &Path, now: u64) -> anyhow::Result<()> {
     let text = read_to_string(file).await?;
     let fresh = |line: &str| {
@@ -115,17 +125,7 @@ async fn prune(file: &Path, now: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn with_commands<F: Future>(future: F) -> F::Output {
-    COMMANDS.scope(RefCell::new(Vec::new()), future).await
-}
-
 /// The commands noted since the last take, in this task's scope.
 fn take_commands() -> Vec<String> {
     COMMANDS.try_with(RefCell::take).unwrap_or_default()
-}
-
-pub(crate) fn note_command(cmd: &str) {
-    let short = cmd.chars().take(COMMAND_CHARS).collect::<String>();
-    // Commands outside a job (the main poll's ls-remote) have no timeline to join.
-    if let Err(_outside) = COMMANDS.try_with(|commands| commands.borrow_mut().push(short)) {}
 }

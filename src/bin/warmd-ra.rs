@@ -2,14 +2,17 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     fmt::Debug,
+    fs,
     fs::File,
     io::{self, BufRead as _, BufReader, Read as _, Write as _},
+    iter, mem,
     mem::ManuallyDrop,
     os::fd::{AsRawFd as _, FromRawFd as _},
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
+    process,
     process::{Command, Stdio},
-    thread,
+    ptr, thread,
     time::Instant,
 };
 
@@ -136,7 +139,7 @@ impl Warm {
     }
 
     fn ready_stats(&self, start: Instant) -> Value {
-        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
         json!({
             "secs": start.elapsed().as_secs(),
             "files": self.local.len(),
@@ -315,8 +318,8 @@ impl Warm {
                 idle.push(self.fork()?);
             }
             // SAFETY: waitpid with WNOHANG only reaps children that already exited.
-            while unsafe { waitpid(-1, std::ptr::null_mut(), WNOHANG) } > 0 {}
-            let mut polled: Vec<pollfd> = std::iter::once(0)
+            while unsafe { waitpid(-1, ptr::null_mut(), WNOHANG) } > 0 {}
+            let mut polled: Vec<pollfd> = iter::once(0)
                 .chain(busy.iter().map(|job| job.reply.as_raw_fd()))
                 .map(|fd| pollfd { fd, events: POLLIN, revents: 0 })
                 .collect();
@@ -335,7 +338,7 @@ impl Warm {
                 }
             }
             for mut job in busy.extract_if(.., |job| job.pid == 0) {
-                let got = std::mem::take(&mut job.got);
+                let got = mem::take(&mut job.got);
                 let text = String::from_utf8_lossy(&got);
                 match from_str::<Value>(text.trim()) {
                     Ok(reply) => say(&reply)?,
@@ -365,7 +368,7 @@ impl Warm {
                     writeln!(child.request, "{check}")?;
                     busy.push(Busy { pid: child.pid, id: check["id"].clone(), reply: child.reply, got: Vec::new() });
                 } else if let Some(advance) = msg.get("advance") {
-                    for child in std::mem::take(&mut idle) {
+                    for child in mem::take(&mut idle) {
                         // SAFETY: kill only signals our own idle child, forked before main moved.
                         unsafe { kill(child.pid, SIGKILL) };
                     }
@@ -437,12 +440,12 @@ fn pipe() -> io::Result<(File, File)> {
 }
 
 fn link(path: &str) -> String {
-    std::fs::read_link(path).map_or_default(|target| target.to_string_lossy().into_owned())
+    fs::read_link(path).map_or_default(|target| target.to_string_lossy().into_owned())
 }
 
 fn pm_pipes() -> Vec<PmPipe> {
-    let me = std::process::id();
-    let ours: Vec<(i32, String)> = std::fs::read_dir("/proc/self/fd")
+    let me = process::id();
+    let ours: Vec<(i32, String)> = fs::read_dir("/proc/self/fd")
         .into_iter()
         .flatten()
         .flatten()
@@ -450,9 +453,9 @@ fn pm_pipes() -> Vec<PmPipe> {
         .collect();
     let fd_for = |target: &str| ours.iter().find(|(_, to)| to == target).map(|(fd, _)| *fd);
     let mut found = Vec::new();
-    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
         let parent = stat.rsplit(')').next().and_then(|rest| rest.split_whitespace().nth(1)?.parse::<u32>().ok());
         let exe = link(&format!("/proc/{pid}/exe"));
         if parent != Some(me) || !exe.contains("proc-macro-srv") {

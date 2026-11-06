@@ -20,7 +20,7 @@ use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
     fs::{read_to_string, remove_file, rename, symlink_metadata, write},
     process::Command,
-    spawn,
+    spawn, sync,
     sync::{OwnedMutexGuard, Semaphore, SemaphorePermit},
     task::spawn_blocking,
     time::sleep,
@@ -57,11 +57,11 @@ pub(crate) struct Repo {
     keep: Duration,
     gens: Mutex<Vec<Arc<Gen>>>,
     status: Mutex<Status>,
-    building: tokio::sync::Mutex<()>,
+    building: sync::Mutex<()>,
     /// The main commit whose build last failed: the poll does not build it again until main moves or the config
     /// is reloaded (a manual refresh still does).
     failed_sha: Mutex<Option<String>>,
-    sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    sessions: Mutex<HashMap<String, Arc<sync::Mutex<()>>>>,
     session_views: Mutex<Vec<SessionView>>,
     cache_bytes: AtomicU64,
     tier1: Tier1,
@@ -111,7 +111,7 @@ impl Repo {
             keep,
             gens: Mutex::new(gens),
             status: Mutex::new(status),
-            building: tokio::sync::Mutex::new(()),
+            building: sync::Mutex::new(()),
             failed_sha: Mutex::default(),
             sessions: Mutex::new(sessions),
             session_views: Mutex::default(),
@@ -697,7 +697,7 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 /// Clears a repo's jobs dir after a restart but keeps its sessions (a branch's warm build), so a deploy costs no warmth.
-async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<sync::Mutex<()>>>> {
     let mut kept = HashMap::new();
     if symlink_metadata(jobs_dir).await.is_err() {
         return Ok(kept);
