@@ -2,10 +2,12 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::OnceLock,
     time::Duration,
 };
 
 use anyhow::{Context as _, ensure};
+use std::io::ErrorKind;
 use tokio::{
     fs::create_dir_all,
     io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -37,6 +39,13 @@ const RESULTS: &str = "/tmp/warmd-results";
 const DONE_MARK: &str = "warmd-done:";
 
 const TIMES_MARK: &str = "warmd-cpu:";
+
+/// Where a tree sees the rustc cache: under `target/`, beside the outputs it fills.
+const RUSTC_STORE: &str = "target/.warmd-rustc";
+
+/// The directory whose [`RUSTC_STORE`] is the rustc cache: an overlay's top lower layer, so a cached output comes
+/// back as a reflink (a clone stays inside one mount).
+static RUSTC_LAYER: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sandbox<'a> {
@@ -111,6 +120,9 @@ impl Sandbox<'_> {
                 create_dir_all(&cache).await?;
                 bwrap.arg("--bind").arg(repo_cache).arg(&cache);
                 bwrap.arg("--bind").arg(dir).arg(&work);
+                if let Some(layer) = RUSTC_LAYER.get() {
+                    bwrap.arg("--bind").arg(layer.join(RUSTC_STORE)).arg(format!("{work}/{RUSTC_STORE}"));
+                }
             }
             Tree::Overlay { lower, layer, cache: repo_cache } => {
                 bwrap.arg("--tmpfs").arg(&home);
@@ -126,16 +138,20 @@ impl Sandbox<'_> {
                 }
                 bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
                 bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
-                bwrap
-                    .arg("--overlay-src")
-                    .arg(lower)
-                    .arg("--overlay")
-                    .arg(layer.join("upper"))
-                    .arg(layer.join("work"))
-                    .arg(&work);
+                bwrap.arg("--overlay-src").arg(lower);
+                if let Some(layer) = RUSTC_LAYER.get() {
+                    bwrap.arg("--overlay-src").arg(layer);
+                }
+                bwrap.arg("--overlay").arg(layer.join("upper")).arg(layer.join("work")).arg(&work);
             }
         }
         bwrap.args(["--setenv", "SLAPSLOP_CACHE", &format!("{work}/{SLAPSLOP_CACHE}")]);
+        if RUSTC_LAYER.get().is_some() {
+            let wrapper = env::current_exe()?.with_file_name("warmd-rustc");
+            // Bound where it is: an overlay tree hides the home it may sit under.
+            bwrap.arg("--ro-bind").arg(&wrapper).arg(&wrapper).arg("--setenv").arg("RUSTC_WRAPPER").arg(&wrapper);
+            bwrap.args(["--setenv", "WARMD_RUSTC_STORE", &format!("{work}/{RUSTC_STORE}")]);
+        }
         if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
             create_dir_all(&remote).await?;
             bwrap.arg("--bind").arg(&remote).arg(&remote).arg("--setenv").arg("SLAPSLOP_REMOTE_CACHE").arg(&remote);
@@ -278,6 +294,53 @@ impl Output {
 
 pub(crate) fn work_path(repo: &str) -> String {
     format!("/tmp/warmd/{repo}")
+}
+
+/// Turns the rustc cache on for every sandbox from now on, with `layer` holding the store, when `warmd-rustc` sits
+/// next to this binary. Returns the store's `v1` directory.
+pub(crate) fn use_rustc_cache(layer: PathBuf) -> anyhow::Result<Option<PathBuf>> {
+    if !env::current_exe()?.with_file_name("warmd-rustc").is_file() {
+        return Ok(None);
+    }
+    let store = layer.join(RUSTC_STORE).join("v1");
+    fs::create_dir_all(&store)?;
+    RUSTC_LAYER.get_or_init(|| layer);
+    Ok(Some(store))
+}
+
+/// Moves what an overlay job added to the rustc cache (in its upper layer) into the store, so other trees hit it.
+pub(crate) fn harvest_rustc_cache(layer: &Path) -> anyhow::Result<usize> {
+    let Some(root) = RUSTC_LAYER.get() else {
+        return Ok(0);
+    };
+    let added = layer.join("upper").join(RUSTC_STORE);
+    let mut moved = 0;
+    let mut pending = vec![added.join("v1")];
+    while let Some(dir) = pending.pop() {
+        for entry in match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
+        } {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let into = root.join(RUSTC_STORE).join(path.strip_prefix(&added)?);
+            if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) || into.exists() {
+                fs::remove_file(&path)?;
+            } else {
+                fs::create_dir_all(into.parent().context("a store path without a directory")?)?;
+                fs::rename(&path, &into)?;
+                moved += 1;
+            }
+        }
+    }
+    if added.exists() {
+        fs::remove_dir_all(&added).with_context(|| format!("removing {}", added.display()))?;
+    }
+    Ok(moved)
 }
 
 /// One file a job of a lanes run wrote to its results directory.

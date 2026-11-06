@@ -6,6 +6,7 @@ keep_hours = 2
 [repos.tempo]
 url = "https://github.com/tempoxyz/tempo"
 clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
+build = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 build --locked"
 jobs = [
   { name = "clippy-runtime", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --bins --all-features --locked --message-format=json --" },
   { name = "clippy-tests", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --tests --all-features --locked --message-format=json --" },
@@ -18,6 +19,7 @@ jobs = [
 [repos.reth]
 url = "https://github.com/paradigmxyz/reth"
 clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
+build = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 build --locked"
 jobs = [
   { name = "clippy-all-features", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --all-features --locked --message-format=json --" },
   { name = "clippy", cmd = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --workspace --lib --examples --tests --benches --locked --message-format=json --" },
@@ -29,6 +31,7 @@ jobs = [
 [repos.slapslop]
 url = "https://github.com/tempoxyz/slapslop"
 clippy = "cargo clippy --locked --message-format=json"
+build = "cargo build --locked"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --locked --workspace --lib --bins --tests --message-format=json -- -D warnings", fix = "cargo clippy --locked --workspace --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", bins_only = true, cmd = "cargo clippy --locked --workspace --lib --bins --all-features --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
@@ -40,6 +43,7 @@ jobs = [
 [repos.warmd]
 url = "https://github.com/joshieDo/warmd"
 clippy = "cargo clippy --locked --message-format=json"
+build = "cargo build --locked"
 jobs = [
   { name = "clippy", cmd = "cargo clippy --all-targets --all-features --locked --message-format=json --", fix = "cargo clippy --all-targets --all-features --locked --fix --allow-dirty --allow-no-vcs" },
   { name = "clippy-non-test", bins_only = true, cmd = "cargo clippy --bins --all-features --locked --message-format=json -- -D clippy::unwrap_used -D clippy::infinite_loop -D clippy::needless_pass_by_value -D dead_code_pub_in_binary" },
@@ -51,6 +55,7 @@ jobs = [
 [repos.evm2]
 url = "https://github.com/alloy-rs/evm2"
 clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --message-format=json"
+build = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 build"
 jobs = [
   { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_231_PREFIX=/usr/lib/llvm-23 LLVM_CONFIG_PATH=/usr/lib/llvm-23/bin/llvm-config cargo +nightly-2026-10-31 clippy --workspace --all-targets --all-features --message-format=json --" },
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --disable decorative_comment_divider,narrator_comment', on_main = 'cargo-slapslop run "$PWD" --all-lints --disable decorative_comment_divider,narrator_comment', slapslop = true },
@@ -61,6 +66,7 @@ jobs = [
 [repos.solar]
 url = "https://github.com/paradigmxyz/solar"
 clippy = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --message-format=json"
+build = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly build"
 jobs = [
   { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo +nightly clippy --workspace --all-targets --message-format=json --" },
   { name = "slapslop", cmd = 'LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --disable decorative_comment_divider,narrator_comment', on_main = 'LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 LLVM_CONFIG_PATH=/usr/lib/llvm-22/bin/llvm-config cargo-slapslop run "$PWD" --all-lints --disable decorative_comment_divider,narrator_comment', slapslop = true },
@@ -71,6 +77,7 @@ jobs = [
 [repos.alloy]
 url = "https://github.com/alloy-rs/alloy"
 clippy = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --message-format=json"
+build = "RUSTFLAGS='-Dwarnings' cargo +stable build --locked"
 jobs = [
   { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' cargo +stable clippy --locked --workspace --all-targets --all-features --message-format=json --" },
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --disable decorative_comment_divider,narrator_comment', on_main = 'cargo-slapslop run "$PWD" --all-lints --disable decorative_comment_divider,narrator_comment', slapslop = true },
@@ -82,6 +89,7 @@ jobs = [
 url = "https://github.com/foundry-rs/foundry"
 branch = "master"
 clippy = "RUSTFLAGS='-Dwarnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"
+build = "RUSTFLAGS='-Dwarnings' cargo +nightly-2026-10-31 build --locked"
 jobs = [
   { name = "clippy", cmd = "RUSTFLAGS='-Dwarnings' cargo +nightly-2026-10-31 clippy --workspace --all-targets --all-features --locked --message-format=json --" },
   { name = "slapslop", cmd = 'cargo-slapslop run "$PWD" --diff HEAD~1 --all-lints --disable decorative_comment_divider,narrator_comment', on_main = 'cargo-slapslop run "$PWD" --all-lints --disable decorative_comment_divider,narrator_comment', slapslop = true },

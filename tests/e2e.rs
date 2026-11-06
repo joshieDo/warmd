@@ -37,6 +37,9 @@ const USES_TWO: &str = "printf '\npub fn uses_two() -> bool {\n    two()\n}\n' >
 
 const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\n' >> src/lib.rs";
 
+const MAIN_RS: &str =
+    "printf 'fn main() {\\n    println!(\"{}\", demo::add(2, 3));\\n}\\n' > src/main.rs && git add -N src/main.rs";
+
 struct Warmd {
     child: Child,
     url: String,
@@ -81,8 +84,13 @@ impl Warmd {
     }
 
     fn job(&self, path: &str, body: &Value) -> Value {
+        self.job_with_id(path, body).1
+    }
+
+    fn job_with_id(&self, path: &str, body: &Value) -> (String, Value) {
         let id = curl("POST", &format!("{}/{path}", self.url), Some(body)).unwrap()["id"].as_str().unwrap().to_owned();
-        self.wait(&id)
+        let job = self.wait(&id);
+        (id, job)
     }
 
     fn wait(&self, id: &str) -> Value {
@@ -506,4 +514,38 @@ fn tier1_answers_before_the_jobs_and_follows_main() {
     assert_eq!(warmd.repo()["tier1"]["state"], "ready");
     let job = tier1(&warmd, USES_TWO);
     assert_eq!(codes(&job["tier1"]["diagnostics"]), ["E0308"], "{job:#}");
+}
+
+#[test]
+fn builds_the_binary_of_a_patch_in_debug_or_release() {
+    let root = demo_root("build");
+    let warmd = Warmd::serve(root.clone(), &root, "", TESTS, &[]);
+    let patch = warmd.diff(MAIN_RS);
+    let base = json!({ "sha": warmd.head() });
+    let build = format!("{}/build", warmd.url);
+    let bad = json!({ "repo": "demo", "base": base, "patch": patch, "binary": { "package": "--all" } });
+    assert!(curl("POST", &build, Some(&bad)).is_none(), "a flag is not a package");
+    let via_check = json!({ "repo": "demo", "base": base, "patch": patch, "binary": { "package": "demo" } });
+    assert!(curl("POST", &format!("{}/check", warmd.url), Some(&via_check)).is_none(), "builds only go through /build");
+
+    for (release, profile) in [(false, "debug"), (true, "release")] {
+        let body = json!({ "repo": "demo", "base": base, "patch": patch, "binary": { "package": "demo", "release": release } });
+        let (id, job) = warmd.job_with_id("build", &body);
+        let built = &job["result"]["binary"];
+        assert_eq!(job["result"]["ok"], true, "{job:#}");
+        assert_eq!((built["name"].as_str(), built["profile"].as_str()), (Some("demo"), Some(profile)), "{job:#}");
+        let file = root.join(format!("demo-{profile}"));
+        let url = format!("{}/jobs/{id}/binary", warmd.url);
+        sh(&root, &format!("curl -fsS -o {} {url} && chmod +x {}", file.display(), file.display()));
+        assert_eq!(sh(&root, &file.display().to_string()), "5\n", "the {profile} binary runs the patch");
+    }
+
+    let broken =
+        warmd.diff("printf 'fn main() {\\n    let _x: u32 = \"no\";\\n}\\n' > src/main.rs && git add -N src/main.rs");
+    let job =
+        warmd.job("build", &json!({ "repo": "demo", "base": base, "patch": broken, "binary": { "package": "demo" } }));
+    assert_eq!(job["result"]["ok"], false, "{job:#}");
+    assert!(job["result"]["output"].as_str().is_some_and(|out| out.contains("mismatched types")), "{job:#}");
+    let units = root.join("state/rustc/target/.warmd-rustc/v1/units");
+    assert!(fs::read_dir(&units).is_ok_and(|mut found| found.next().is_some()), "rustc's outputs went to the cache");
 }

@@ -8,6 +8,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: warmd check [--full] [--only JOBS] [--skip JOBS] [--args JSON]
        warmd test -p PACKAGE TEST...   (those tests on a warm build; prints their stdout and stderr, exits with their code)
+       warmd build -p PACKAGE [--bin NAME] [--release] [--features A,B] [-o PATH]   (builds the binary with your changes, downloads it, prints its path)
        warmd track [JOB_ID]
        warmd hits [REPO] [JOB]
        warmd remote [ls | add IP:PORT | rm IP:PORT]
@@ -109,6 +110,8 @@ cmd=${1:-}
 shift
 
 tests=null
+binary=null
+out=
 case $cmd in
   track)
     if [[ $# -gt 0 ]]; then
@@ -144,6 +147,23 @@ case $cmd in
     [[ ${1:-} == -p && $# -ge 3 ]] || usage
     tests=$(jq -nc --arg package "$2" '{package: $package, names: $ARGS.positional}' --args "${@:3}")
     set --
+    ;;
+  build)
+    release=false bin= package= features=
+    while (($#)); do
+      case $1 in
+        -p) package=$2; shift ;;
+        --bin) bin=$2; shift ;;
+        --release) release=true ;;
+        --features) features=$2; shift ;;
+        -o) out=$2; shift ;;
+        *) echo "warmd: unknown argument $1" >&2; usage ;;
+      esac
+      shift
+    done
+    [[ -n $package ]] || usage
+    binary=$(jq -nc --arg package "$package" --arg bin "$bin" --argjson release "$release" --arg features "$features" \
+      '{package: $package, release: $release, features: ($features | split(",") | map(select(. != "")))} + (if $bin == "" then {} else {bin: $bin} end)')
     ;;
   *) usage ;;
 esac
@@ -182,11 +202,12 @@ git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
 done
 
 body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
-  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" --argjson tests "$tests" \
+  --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" --argjson tests "$tests" --argjson binary "$binary" \
   '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip, only: $only }
-   + (if $tests == null then {} else { tests: $tests } end)')
+   + (if $tests == null then {} else { tests: $tests } end) + (if $binary == null then {} else { binary: $binary } end)')
 endpoint=check
 [[ $cmd == test ]] && endpoint="test"
+[[ $cmd == build ]] && endpoint="build"
 if ! ids=$(curl -sS --fail-with-body -X POST "$url/$endpoint" -H 'content-type: application/json' -d "$body"); then
   echo "warmd: $ids" >&2
   exit 2
@@ -196,6 +217,24 @@ full_id=$(jq -r '.full_id // empty' <<<"$ids")
 printf '%s %s\n' "$id" "$full_id" >"$(last_file)"
 
 echo "warmd: queued $repo $branch against ${base:0:7}: job $id${full_id:+ (full: $full_id)}" >&2
+if [[ $cmd == build ]]; then
+  job=$(wait_job "$id") || exit 1
+  if [[ $(jq -r .result.outcome <<<"$job") == rebase_needed ]]; then
+    jq -r '"warmd: rebase onto main first, conflicts in: " + (.result.files | join(", "))' <<<"$job" >&2
+    exit 1
+  fi
+  if [[ $(jq -r .result.ok <<<"$job") != true ]]; then
+    jq -r '.result.output // "the build failed"' <<<"$job" >&2
+    exit 1
+  fi
+  name=$(jq -r .result.binary.name <<<"$job")
+  [[ -n $out ]] || out="$root/target/warmd/$(jq -r .result.binary.profile <<<"$job")/$name"
+  mkdir -p "$(dirname "$out")"
+  curl -fsS -o "$out.part" "$url/jobs/$id/binary" && chmod +x "$out.part" && mv "$out.part" "$out"
+  echo "warmd: built $name ($(jq -r '.result.binary.profile' <<<"$job"), $(jq -r '.result.binary.bytes / 1048576 | floor' <<<"$job") MiB)" >&2
+  echo "$out"
+  exit 0
+fi
 if [[ $cmd == test ]]; then
   track "$id" "" >/dev/null
   exit $?

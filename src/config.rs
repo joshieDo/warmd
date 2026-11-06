@@ -44,6 +44,10 @@ pub(crate) struct RepoCfg {
     pub(crate) jobs: Vec<Job>,
     #[serde(default = "default_clippy")]
     pub(crate) clippy: String,
+    /// What `warmd build` runs, before its `-p`, `--bin` and `--release`: the toolchain and flags of the test job, so a
+    /// debug build reuses main's warm test build.
+    #[serde(default = "default_build")]
+    pub(crate) build: String,
     pub(crate) ra: Option<RaCfg>,
 }
 
@@ -178,10 +182,8 @@ pub(crate) struct Tests {
 
 impl Tests {
     pub(crate) fn problem(&self) -> Option<String> {
-        if self.package.is_empty()
-            || !self.package.chars().all(|char| char.is_ascii_alphanumeric() || char == '-' || char == '_')
-        {
-            return Some(format!("package {:?} is not a package name", self.package));
+        if let Some(problem) = name_problem("package", &self.package) {
+            return Some(problem);
         }
         if self.names.is_empty() {
             return Some("name the tests to run: workspace or whole-package runs are refused".to_owned());
@@ -195,6 +197,63 @@ impl Tests {
     pub(crate) fn fill(&self, cmd: &str) -> String {
         cmd.replace("{package}", &quote_all(slice::from_ref(&self.package))).replace("{tests}", &quote_all(&self.names))
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Binary {
+    package: String,
+    bin: Option<String>,
+    #[serde(default)]
+    release: bool,
+    #[serde(default)]
+    features: Vec<String>,
+}
+
+impl Binary {
+    pub(crate) fn problem(&self) -> Option<String> {
+        name_problem("package", &self.package)
+            .or_else(|| self.bin.as_deref().and_then(|bin| name_problem("bin", bin)))
+            .or_else(|| {
+                self.features
+                    .iter()
+                    .find(|feature| feature.starts_with('-'))
+                    .map(|feature| format!("feature {feature:?} looks like a flag"))
+            })
+    }
+
+    pub(crate) const fn profile(&self) -> &'static str {
+        if self.release { "release" } else { "debug" }
+    }
+
+    pub(crate) fn bin(&self) -> Option<&str> {
+        self.bin.as_deref()
+    }
+
+    pub(crate) fn cmd(&self, build: &str) -> String {
+        let mut cmd = format!(
+            "{build} --message-format=json-render-diagnostics -p {}",
+            quote_all(slice::from_ref(&self.package))
+        );
+        if let Some(bin) = &self.bin {
+            cmd.push_str(&format!(" --bin {}", quote_all(slice::from_ref(bin))));
+        }
+        if self.release {
+            cmd.push_str(" --release");
+        }
+        if !self.features.is_empty() {
+            cmd.push_str(&format!(" --features {}", quote_all(slice::from_ref(&self.features.join(",")))));
+        }
+        cmd
+    }
+}
+
+/// Why `name` is not a package or target name, if it is not.
+fn name_problem(what: &str, name: &str) -> Option<String> {
+    (name.is_empty()
+        || name.starts_with('-')
+        || !name.chars().all(|char| char.is_ascii_alphanumeric() || char == '-' || char == '_'))
+    .then(|| format!("{what} {name:?} is not a {what} name"))
 }
 
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
@@ -220,6 +279,10 @@ const fn default_jobs_per_repo() -> u16 {
 
 fn default_branch() -> String {
     "main".to_owned()
+}
+
+fn default_build() -> String {
+    "cargo build".to_owned()
 }
 
 fn default_clippy() -> String {

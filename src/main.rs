@@ -15,16 +15,20 @@ use std::{
 use anyhow::{Context as _, anyhow};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Html,
+    http::{
+        StatusCode,
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+    },
+    response::{Html, Response},
     routing::{delete, get, post},
     serve,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, from_str, json, to_value};
 use tokio::{
-    fs::{read_to_string, write},
+    fs::{File, read_to_string, write},
     join,
     net::TcpListener,
     select,
@@ -34,6 +38,7 @@ use tokio::{
     task::block_in_place,
     time::sleep,
 };
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::{
@@ -219,8 +224,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    if let Some(store) = sandbox::use_rustc_cache(config.state_dir.join("rustc"))? {
+        spawn(prune_store_forever(store, "rustc cache"));
+    }
     if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
-        spawn(prune_remote_forever(PathBuf::from(remote)));
+        spawn(prune_store_forever(PathBuf::from(remote).join("v1"), "slapslop store"));
     }
     spawn(dispatch_forever(Arc::clone(&app)));
     spawn(remote::poll_capacity_forever(Arc::clone(&app)));
@@ -231,8 +239,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/stats", get(stats_view))
         .route("/check", post(submit))
         .route("/test", post(submit_tests))
+        .route("/build", post(submit_binary))
         .route("/slapslop/baseline", post(slapslop_baseline))
         .route("/jobs/{id}", get(job))
+        .route("/jobs/{id}/binary", get(binary))
         .route("/repos/{name}", get(repo_view))
         .route("/repos/{name}/refresh", post(refresh))
         .route("/repos/{name}/hits", get(hits))
@@ -249,6 +259,9 @@ async fn main() -> anyhow::Result<()> {
 async fn submit(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
     if req.tests().is_some() {
         return Err((StatusCode::BAD_REQUEST, "tests go to POST /test".to_owned()));
+    }
+    if req.binary().is_some() {
+        return Err((StatusCode::BAD_REQUEST, "builds go to POST /build".to_owned()));
     }
     let repo = app.repo(req.repo())?;
     if req.wants_full() {
@@ -411,6 +424,9 @@ async fn capacity(State(app): State<Arc<App>>) -> Json<Value> {
 
 async fn submit_tests(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
     let repo = app.repo(req.repo())?;
+    if req.binary().is_some() {
+        return Err((StatusCode::BAD_REQUEST, "builds go to POST /build".to_owned()));
+    }
     let Some(tests) = req.tests() else {
         return Err((StatusCode::BAD_REQUEST, "name tests: {\"package\": .., \"names\": [..]}".to_owned()));
     };
@@ -423,7 +439,40 @@ async fn submit_tests(State(app): State<Arc<App>>, Json(req): Json<Request>) -> 
             format!("{} has no test job with {{package}} and {{tests}} in its cmd", repo.name()),
         ));
     }
-    Ok(Json(json!({ "id": start(&app, &repo, req.only_tests()) })))
+    Ok(Json(json!({ "id": start(&app, &repo, req.alone()) })))
+}
+
+async fn submit_binary(State(app): State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
+    let repo = app.repo(req.repo())?;
+    if req.tests().is_some() {
+        return Err((StatusCode::BAD_REQUEST, "tests go to POST /test".to_owned()));
+    }
+    let Some(binary) = req.binary() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name the binary: {\"package\": .., \"bin\": .., \"release\": ..}".to_owned(),
+        ));
+    };
+    if let Some(problem) = binary.problem() {
+        return Err((StatusCode::BAD_REQUEST, problem));
+    }
+    Ok(Json(json!({ "id": start(&app, &repo, req.alone()) })))
+}
+
+async fn binary(State(app): State<Arc<App>>, Path(id): Path<Uuid>) -> Result<Response, (StatusCode, String)> {
+    let file = match app.jobs.lock().unwrap_or_else(PoisonError::into_inner).get(&id) {
+        Some((_, Job::Done { result: Done::Check(outcome), .. })) => outcome.binary_file().map(FsPath::to_path_buf),
+        Some(_) => None,
+        None => return Err((StatusCode::NOT_FOUND, format!("no job {id}"))),
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} built no binary")))?;
+    let opened = File::open(&file).await.map_err(|err| (StatusCode::GONE, format!("{}: {err}", file.display())))?;
+    let bytes = opened.metadata().await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?.len();
+    Response::builder()
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_LENGTH, bytes)
+        .body(Body::from_stream(ReaderStream::new(opened)))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 async fn slapslop_baseline(app: State<Arc<App>>, Json(req): Json<Request>) -> Reply<Value> {
@@ -531,13 +580,11 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
     }))
 }
 
-async fn prune_remote_forever(dir: PathBuf) -> ! {
+async fn prune_store_forever(dir: PathBuf, label: &'static str) -> ! {
     loop {
-        match block_in_place(|| prune_remote(&dir.join("v1"), SystemTime::now())) {
+        match block_in_place(|| prune_store(&dir, SystemTime::now())) {
             Ok((units, blobs)) if units + blobs > 0 => {
-                eprintln!(
-                    "warmd: slapslop store: removed {units} entries unused for 4 days and {blobs} unreferenced blobs"
-                );
+                eprintln!("warmd: {label}: removed {units} entries unused for 4 days and {blobs} unreferenced blobs");
             }
             Ok(_) => {}
             Err(err) => eprintln!("warmd: pruning {}: {err:#}", dir.display()),
@@ -546,7 +593,7 @@ async fn prune_remote_forever(dir: PathBuf) -> ! {
     }
 }
 
-fn prune_remote(store: &FsPath, now: SystemTime) -> anyhow::Result<(usize, usize)> {
+fn prune_store(store: &FsPath, now: SystemTime) -> anyhow::Result<(usize, usize)> {
     let older = |at: SystemTime, age: Duration| now.duration_since(at).is_ok_and(|since| since > age);
     let mut live = HashSet::new();
     let mut units = 0;

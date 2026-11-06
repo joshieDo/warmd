@@ -1,15 +1,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_str, json};
-use tokio::fs::{create_dir_all, read_to_string, write};
+use tokio::{
+    fs::{copy, create_dir_all, read_dir, read_to_string, remove_dir_all, symlink_metadata, write},
+    task::block_in_place,
+};
+use uuid::Uuid;
 
 use crate::{
-    config::{ArgsOverride, FULL_CLIPPY, Profile, Step, Tests},
+    config::{ArgsOverride, Binary, FULL_CLIPPY, Profile, Step, Tests},
     diag::{self, Diag},
     lanes,
     metrics::{self, Clock, Phase},
@@ -19,6 +25,9 @@ use crate::{
 };
 
 const SLAPSLOP_BASELINE: &str = ".slapslop/baseline.toml";
+
+/// How long a built binary stays for download.
+const BINARY_KEPT: Duration = Duration::from_hours(1);
 
 const COMMIT: &str = "git -c user.name=warmd -c user.email=warmd@localhost commit -q --no-verify --allow-empty";
 
@@ -59,6 +68,7 @@ pub(crate) struct Request {
     #[serde(default)]
     only: Vec<String>,
     tests: Option<Tests>,
+    binary: Option<Binary>,
     #[serde(skip)]
     baseline_only: bool,
     #[serde(skip)]
@@ -73,6 +83,8 @@ impl Request {
     pub(crate) const fn kind(&self) -> &'static str {
         if self.baseline_only {
             "slapslop_baseline"
+        } else if self.binary.is_some() {
+            "binary"
         } else if self.tests.is_some() {
             "test"
         } else if self.full_only {
@@ -95,6 +107,7 @@ impl Request {
             "patch_files": changed_files(&self.patch).len(),
             "slapslop_baseline": self.slapslop_baseline.is_some(),
             "tests": self.tests,
+            "binary": self.binary,
         })
     }
 
@@ -102,7 +115,11 @@ impl Request {
         self.tests.as_ref()
     }
 
-    pub(crate) fn only_tests(self) -> Self {
+    pub(crate) const fn binary(&self) -> Option<&Binary> {
+        self.binary.as_ref()
+    }
+
+    pub(crate) fn alone(self) -> Self {
         Self { full: false, fix: false, ..self }
     }
 
@@ -132,7 +149,7 @@ impl Request {
     }
 
     pub(crate) const fn remote_ok(&self) -> bool {
-        !self.full_only
+        !self.full_only && self.binary.is_none()
     }
 }
 
@@ -197,15 +214,43 @@ pub(crate) enum Outcome {
     Checked(Report),
     RebaseNeeded { files: Vec<String> },
     SlapslopBaseline { baseline: String },
+    Built(Built),
 }
 
 impl Outcome {
     fn ran_on(&self) -> Option<String> {
         match self {
             Self::Checked(report) => Some(report.ran_on.clone()),
+            Self::Built(built) => Some(built.ran_on.clone()),
             Self::RebaseNeeded { .. } | Self::SlapslopBaseline { .. } => None,
         }
     }
+
+    pub(crate) fn binary_file(&self) -> Option<&Path> {
+        match self {
+            Self::Built(Built { binary: Some(binary), .. }) => Some(&binary.file),
+            Self::Built(_) | Self::Checked(_) | Self::RebaseNeeded { .. } | Self::SlapslopBaseline { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Built {
+    ok: bool,
+    ran_on: String,
+    rebased_from: Option<String>,
+    session_reused: bool,
+    binary: Option<BuiltBinary>,
+    output: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BuiltBinary {
+    name: String,
+    profile: &'static str,
+    bytes: u64,
+    #[serde(skip)]
+    file: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -371,8 +416,11 @@ pub(crate) async fn run(
         None => (layer.to_owned(), None),
     };
     let outcome = check(repo, full, req, &layer, running, progress, &mut clock).await;
+    if let Err(err) = block_in_place(|| sandbox::harvest_rustc_cache(&layer)) {
+        eprintln!("warmd: {}: keeping the rustc cache's new entries: {err:#}", repo.name());
+    }
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
-    if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(_))) {
+    if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(_) | Outcome::Built(_))) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
         let meta = json!({ "gen": built_on, "used_at": now_secs(), "session": session_name, "bytes": layer_bytes })
             .to_string();
@@ -387,12 +435,13 @@ pub(crate) async fn run(
         Ok(Outcome::Checked(report)) => report.summary(),
         Ok(Outcome::RebaseNeeded { .. }) => "rebase_needed".to_owned(),
         Ok(Outcome::SlapslopBaseline { .. }) => "baseline".to_owned(),
+        Ok(Outcome::Built(built)) => if built.ok { "built" } else { "build failed" }.to_owned(),
         Err(err) => format!("failed: {err:#}"),
     };
     let ran_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
     let warmth = outcome.as_ref().ok().and_then(|done| match done {
         Outcome::Checked(report) => Some(report.metrics()),
-        Outcome::RebaseNeeded { .. } | Outcome::SlapslopBaseline { .. } => None,
+        Outcome::RebaseNeeded { .. } | Outcome::SlapslopBaseline { .. } | Outcome::Built(_) => None,
     });
     let fields = json!({
         "warmth": warmth,
@@ -516,6 +565,21 @@ async fn check(
         ensure!(out.ok(), "generating the slapslop baseline: {}", out.tail());
         clock.mark("slapslop_baseline");
         return Ok(Outcome::SlapslopBaseline { baseline: out.stdout });
+    }
+    if let Some(binary) = &req.binary {
+        let out = sandbox.run(&binary.cmd(&cfg.build), None).await?;
+        clock.mark(format!("build:{}", binary.profile()));
+        let made =
+            if out.ok() { Some(keep_binary(repo, binary, &out.stdout, layer, generation.dir()).await?) } else { None };
+        clock.mark("copy_binary");
+        return Ok(Outcome::Built(Built {
+            ok: made.is_some(),
+            ran_on: generation.sha().to_owned(),
+            rebased_from,
+            session_reused,
+            binary: made,
+            output: (!out.ok()).then(|| out.tail()),
+        }));
     }
 
     let added = diag::added_lines(&req.patch);
@@ -654,6 +718,69 @@ async fn check(
         full,
         fix_patch,
     }))
+}
+
+async fn keep_binary(
+    repo: &Repo,
+    binary: &Binary,
+    messages: &str,
+    layer: &Path,
+    lower: &Path,
+) -> anyhow::Result<BuiltBinary> {
+    let mut made = messages
+        .lines()
+        .filter_map(|line| from_str::<Value>(line).ok())
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .filter(|message| {
+            message["target"]["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|message| {
+            Some((message["target"]["name"].as_str()?.to_owned(), message["executable"].as_str()?.to_owned()))
+        })
+        .filter(|(name, _)| binary.bin().is_none_or(|bin| bin == name))
+        .collect::<Vec<_>>();
+    made.dedup();
+    let (name, executable) = match made.as_slice() {
+        [one] => one.clone(),
+        [] => bail!("the build made no binary"),
+        several => bail!(
+            "the package has several binaries, name one with --bin: {}",
+            several.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let relative = Path::new(&executable)
+        .strip_prefix(sandbox::work_path(repo.name()))
+        .with_context(|| format!("{executable} is outside the tree"))?;
+    let mut source = None;
+    for candidate in [layer.join("upper").join(relative), lower.join(relative)] {
+        if symlink_metadata(&candidate).await.is_ok_and(|meta| meta.is_file()) {
+            source = Some(candidate);
+            break;
+        }
+    }
+    let source = source.with_context(|| format!("{executable} is in neither the tree's layer nor main's build"))?;
+    let builds = repo.jobs_dir().with_file_name("builds");
+    drop_old_binaries(&builds).await?;
+    let dir = builds.join(Uuid::new_v4().to_string());
+    create_dir_all(&dir).await?;
+    let file = dir.join(&name);
+    let bytes = copy(&source, &file).await.with_context(|| format!("copying {}", source.display()))?;
+    Ok(BuiltBinary { name, profile: binary.profile(), bytes, file })
+}
+
+async fn drop_old_binaries(builds: &Path) -> anyhow::Result<()> {
+    let mut entries = match read_dir(builds).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", builds.display())),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let modified = entry.metadata().await?.modified()?;
+        if SystemTime::now().duration_since(modified).is_ok_and(|age| age > BINARY_KEPT) {
+            remove_dir_all(entry.path()).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str) -> anyhow::Result<Vec<Diag>> {
