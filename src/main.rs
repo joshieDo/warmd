@@ -62,6 +62,7 @@ mod remote;
 mod repo;
 mod sandbox;
 mod stats;
+mod sweep;
 
 const SECS_PER_HOUR: u64 = 3600;
 

@@ -18,7 +18,7 @@ use fiemap::fiemap;
 use serde::Serialize;
 use serde_json::{Value, from_slice, from_str, json, to_vec};
 use tokio::{
-    fs::{read_to_string, remove_file, rename, symlink_metadata, write},
+    fs::{read_dir, read_to_string, remove_file, rename, symlink_metadata, write},
     process::Command,
     spawn, sync,
     sync::{OwnedMutexGuard, Semaphore, SemaphorePermit},
@@ -34,7 +34,10 @@ use crate::{
     ra::Tier1,
     sandbox::{Sandbox, Tree},
     stats::now_secs,
+    sweep::Swept,
 };
+
+const SWEEP_GRACE: Duration = Duration::from_hours(24);
 
 const SESSION_IDLE: Duration = Duration::from_mins(30);
 
@@ -65,6 +68,7 @@ pub(crate) struct Repo {
     session_views: Mutex<Vec<SessionView>>,
     cache_bytes: AtomicU64,
     tier1: Tier1,
+    swept: AtomicBool,
 }
 
 impl Repo {
@@ -117,6 +121,7 @@ impl Repo {
             session_views: Mutex::default(),
             cache_bytes: AtomicU64::new(0),
             tier1: Tier1::default(),
+            swept: AtomicBool::new(false),
         })
     }
 
@@ -364,6 +369,9 @@ impl Repo {
                 Err(err) => {
                     *self.failed_sha.lock().unwrap_or_else(PoisonError::into_inner) = Some(head.clone());
                     self.set_status(State::Failed, &head, Some(format!("{err:#}")), phases);
+                    if let Err(pruned) = self.prune(keep).await {
+                        eprintln!("warmd: {}: pruning after a failed build: {pruned:#}", self.name);
+                    }
                     return Err(err);
                 }
             }
@@ -371,6 +379,10 @@ impl Repo {
             self.rescan(&current).await?;
         }
         if let Some(current) = self.current() {
+            if !self.swept.swap(true, Ordering::Relaxed) {
+                let _all = self.slots.acquire_many(self.slot_count).await?;
+                self.sweep(&current.dir, current.born).await;
+            }
             self.tier1.follow(self, current, keep).await;
         }
         self.prune(keep).await
@@ -469,6 +481,7 @@ impl Repo {
         let cfg = self.cfg();
         let mut baseline = Baseline::new();
         let mut broken = Broken::new();
+        let started = SystemTime::now();
         lanes::run(sandbox, cfg.jobs.iter().map(|job| (job, job.main_cmd())).collect(), clock, |job, out, found| {
             if !out.ok() && found.is_empty() && !job.test {
                 broken.insert(job.name.clone(), out.tail());
@@ -489,6 +502,8 @@ impl Repo {
         {
             bail!("{name} failed on {sha}: {tail}");
         }
+        self.sweep(&tmp, started).await;
+        clock.mark("sweep");
         rename(&tmp, &dir).await?;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         write(self.gens_dir.join(format!("{sha}.broken.json")), to_vec(&broken)?).await?;
@@ -536,7 +551,33 @@ impl Repo {
             }
             remove_tree(&self.gens_dir.join(sha)).await?;
         }
+        let owned = self.gens().iter().map(|generation| generation.sha.clone()).collect::<HashSet<_>>();
+        let mut entries = read_dir(&self.gens_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if owned.contains(entry.file_name().to_string_lossy().split('.').next().unwrap_or_default()) {
+                continue;
+            }
+            if entry.file_type().await?.is_dir() {
+                remove_tree(&entry.path()).await?;
+            } else {
+                remove_file(entry.path()).await?;
+            }
+        }
         Ok(())
+    }
+
+    async fn sweep(&self, tree: &Path, built_at: SystemTime) {
+        let (target, name) = (tree.join("target"), self.name.clone());
+        match spawn_blocking(move || Swept::sweep(&target, built_at.checked_sub(SWEEP_GRACE).unwrap_or(built_at))).await
+        {
+            Ok(Ok(swept)) if swept.units + swept.incremental > 0 => eprintln!(
+                "warmd: {name}: removed {} unused build units and {} incremental dirs",
+                swept.units, swept.incremental
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => eprintln!("warmd: {name}: sweeping the target dir: {err:#}"),
+            Err(err) => eprintln!("warmd: {name}: sweeping the target dir: {err}"),
+        }
     }
 
     fn set_status(&self, state: State, sha: &str, error: Option<String>, phases: Vec<Phase>) {
