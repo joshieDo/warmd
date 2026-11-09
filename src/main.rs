@@ -68,6 +68,8 @@ const SECS_PER_HOUR: u64 = 3600;
 
 const PRUNE_EVERY: Duration = Duration::from_hours(1);
 
+const DAY: Duration = Duration::from_hours(24);
+
 const STRAY_AFTER: Duration = Duration::from_hours(1);
 
 const O_NOATIME: i32 = 0o1_000_000;
@@ -226,10 +228,14 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     if let Some(store) = sandbox::use_rustc_cache(config.state_dir.join("rustc"))? {
-        spawn(prune_store_forever(store, "rustc cache"));
+        spawn(prune_store_forever(store, "rustc cache", DAY));
     }
     if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
-        spawn(prune_store_forever(PathBuf::from(remote).join("v1"), "slapslop store"));
+        spawn(prune_store_forever(
+            PathBuf::from(remote).join("v1"),
+            "slapslop store",
+            Duration::from_secs(RETAIN_SECS),
+        ));
     }
     spawn(dispatch_forever(Arc::clone(&app)));
     spawn(remote::poll_capacity_forever(Arc::clone(&app)));
@@ -581,11 +587,14 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
     }))
 }
 
-async fn prune_store_forever(dir: PathBuf, label: &'static str) -> ! {
+async fn prune_store_forever(dir: PathBuf, label: &'static str, kept: Duration) -> ! {
     loop {
-        match block_in_place(|| prune_store(&dir, SystemTime::now())) {
+        match block_in_place(|| prune_store(&dir, SystemTime::now(), kept)) {
             Ok((units, blobs)) if units + blobs > 0 => {
-                eprintln!("warmd: {label}: removed {units} entries unused for 4 days and {blobs} unreferenced blobs");
+                eprintln!(
+                    "warmd: {label}: removed {units} entries unused for {}h and {blobs} unreferenced blobs",
+                    kept.as_secs() / SECS_PER_HOUR
+                );
             }
             Ok(_) => {}
             Err(err) => eprintln!("warmd: pruning {}: {err:#}", dir.display()),
@@ -594,7 +603,7 @@ async fn prune_store_forever(dir: PathBuf, label: &'static str) -> ! {
     }
 }
 
-fn prune_store(store: &FsPath, now: SystemTime) -> anyhow::Result<(usize, usize)> {
+fn prune_store(store: &FsPath, now: SystemTime, retain: Duration) -> anyhow::Result<(usize, usize)> {
     let older = |at: SystemTime, age: Duration| now.duration_since(at).is_ok_and(|since| since > age);
     let mut live = HashSet::new();
     let mut units = 0;
@@ -604,7 +613,7 @@ fn prune_store(store: &FsPath, now: SystemTime) -> anyhow::Result<(usize, usize)
             let meta = metadata(&entry)?;
             let (accessed, modified) = (meta.accessed()?, meta.modified()?);
             let is_unit = entry.extension().is_some_and(|ext| ext == "json");
-            let age = if is_unit { Duration::from_secs(RETAIN_SECS) } else { STRAY_AFTER };
+            let age = if is_unit { retain } else { STRAY_AFTER };
             if older(if is_unit { accessed.max(modified) } else { modified }, age) {
                 remove_file(&entry)?;
                 units += usize::from(is_unit);

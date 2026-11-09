@@ -27,6 +27,7 @@ use tokio::{
 };
 
 use crate::{
+    DAY,
     config::{Job, RepoCfg},
     diag::{self, Diag},
     lanes,
@@ -36,8 +37,6 @@ use crate::{
     stats::now_secs,
     sweep::Swept,
 };
-
-const SWEEP_GRACE: Duration = Duration::from_hours(24);
 
 const SESSION_IDLE: Duration = Duration::from_mins(30);
 
@@ -568,8 +567,7 @@ impl Repo {
 
     async fn sweep(&self, tree: &Path, built_at: SystemTime) {
         let (target, name) = (tree.join("target"), self.name.clone());
-        match spawn_blocking(move || Swept::sweep(&target, built_at.checked_sub(SWEEP_GRACE).unwrap_or(built_at))).await
-        {
+        match spawn_blocking(move || Swept::sweep(&target, built_at.checked_sub(DAY).unwrap_or(built_at))).await {
             Ok(Ok(swept)) if swept.units + swept.incremental > 0 => eprintln!(
                 "warmd: {name}: removed {} unused build units and {} incremental dirs",
                 swept.units, swept.incremental
