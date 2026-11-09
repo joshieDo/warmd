@@ -776,8 +776,15 @@ fn session_key(name: &str) -> String {
 
 /// The installed slapslop's version line, none when it does not run.
 async fn installed_slapslop() -> Option<String> {
-    let out = Command::new("cargo-slapslop").arg("--version").output().await.ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|line| !line.is_empty())
+    let out = Command::new("sh")
+        .args(["-c", r#"cargo-slapslop --version && cat "$(dirname "$(readlink -f "$(command -v cargo-slapslop)")")/../BUILD" 2>/dev/null; true"#])
+        .output()
+        .await
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| line.starts_with("cargo-slapslop"))
 }
 
 async fn measure(gens: Vec<Arc<Gen>>) {

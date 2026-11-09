@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Installs the newest slapslop built from tempoxyz/slapslop main (the Release workflow's artifact) into a stable path,
+# so warmd sees a new build (its --version plus BUILD) and rescans main. Run by warmd-slapslop-update.timer.
+set -euo pipefail
+dest=${SLAPSLOP_MAIN_DIR:-$HOME/.local/share/slapslop/main}
+read -r run sha < <(gh api 'repos/tempoxyz/slapslop/actions/artifacts?name=slapslop-x86_64-unknown-linux-gnu&per_page=50' \
+  --jq '[.artifacts[] | select(.workflow_run.head_branch == "main" and .expired == false)][0] | "\(.workflow_run.id) \(.workflow_run.head_sha[0:7])"')
+[[ -n ${sha:-} ]] || { echo "slapslop-update: no unexpired main artifact" >&2; exit 1; }
+if [[ $(cat "$dest/BUILD" 2>/dev/null) == "$sha" ]]; then
+  exit 0
+fi
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+gh run download "$run" -R tempoxyz/slapslop -n slapslop-x86_64-unknown-linux-gnu -D "$tmp"
+(cd "$tmp" && sha256sum -c --quiet ./*.sha256 && tar -xzf slapslop-dev-"$sha"-x86_64-unknown-linux-gnu.tar.gz)
+mkdir -p "$dest/bin"
+for tool in cargo-slapslop slapslop-driver; do
+  install -m755 "$tmp/slapslop-dev-$sha-x86_64-unknown-linux-gnu/bin/$tool" "$dest/bin/.$tool.new"
+  mv -f "$dest/bin/.$tool.new" "$dest/bin/$tool"
+done
+echo "$sha" > "$dest/BUILD.new" && mv -f "$dest/BUILD.new" "$dest/BUILD"
+echo "slapslop-update: installed main $sha"
