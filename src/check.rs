@@ -15,7 +15,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    config::{ArgsOverride, Binary, FULL_CLIPPY, Profile, Step, Tests},
+    config::{ArgsOverride, Binary, FULL_CLIPPY, Profile, RepoCfg, Step, Tests},
     diag::{self, Diag},
     lanes,
     metrics::{self, Clock, Phase},
@@ -94,8 +94,9 @@ impl Request {
         }
     }
 
-    pub(crate) fn summary(&self) -> Value {
+    pub(crate) fn summary(&self, cfg: &RepoCfg) -> Value {
         json!({
+            "commands": self.commands(cfg),
             "session": self.session,
             "full": self.full,
             "full_only": self.full_only,
@@ -109,6 +110,21 @@ impl Request {
             "tests": self.tests,
             "binary": self.binary,
         })
+    }
+
+    fn commands(&self, cfg: &RepoCfg) -> Vec<String> {
+        if let Some(binary) = &self.binary {
+            return vec![binary.cmd(&cfg.build)];
+        }
+        cfg.jobs
+            .iter()
+            .filter(|job| !self.full_only && job.wanted(self.tests.is_some(), &self.only, &self.skip, &cfg.jobs))
+            .map(|job| {
+                let custom = self.args.get(&job.name);
+                let cmd = job.render(&job.cmd, custom);
+                self.tests.as_ref().filter(|_| job.test).map_or_else(|| cmd.clone(), |tests| tests.fill(&cmd))
+            })
+            .collect()
     }
 
     pub(crate) const fn tests(&self) -> Option<&Tests> {
@@ -405,7 +421,7 @@ pub(crate) async fn run(
         .and_then(|text| text.split_whitespace().next().and_then(|load| load.parse::<f64>().ok()));
     let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
-    let request = req.summary();
+    let request = req.summary(&repo.cfg());
     let session_name = req.session.clone().filter(|_| !req.full_only);
     let (layer, session_guard) = match session_name.clone() {
         Some(name) => {

@@ -291,7 +291,7 @@ fn start(app: &Arc<App>, repo: &Arc<Repo>, req: Request) -> Uuid {
         started: now_secs(),
         running_since: None,
         remote: None,
-        request: req.summary(),
+        request: req.summary(&repo.cfg()),
     };
     app.live.lock().unwrap_or_else(PoisonError::into_inner).insert(id, live);
     app.balance.enqueue(Pending::new(id, req));

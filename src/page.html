@@ -179,6 +179,9 @@ function detailHtml(head, f, req, timeline) {
       kv("Session", esc(req.session || "")) + kv("Full set", yes(req.full || req.full_only)) + kv("Only", chips(req.only)) + kv("Skip", chips(req.skip)) +
       kv("Args", argsHtml(req.args)) + kv("Fix patch", yes(req.fix)) + kv("Own slapslop baseline", yes(req.slapslop_baseline)) +
       kv("Patch", req.patch_lines != null ? req.patch_files + " files, " + req.patch_lines + " lines" : "") +
+      kv("Tests", req.tests ? esc(req.tests.package) + ": " + chips(req.tests.names) : "") +
+      kv("Binary", req.binary ? esc(req.binary.package) + (req.binary.bin ? " --bin " + esc(req.binary.bin) : "") + " (" + (req.binary.release ? "release" : "debug") + ")" + ((req.binary.features || []).length ? " --features " + esc(req.binary.features.join(",")) : "") : "") +
+      kv("Commands", (req.commands || []).map(c => "<code>" + esc(c) + "</code>").join("<br>")) +
       (Object.keys(req).length ? "" : '<div class="muted">Not recorded for jobs before this change.</div>') +
     '</section></div>' +
     '<div>' + (timeline ? '<section><h2>Phases</h2>' + timeline.table + '</section>' : '') + '</div></div>' +
