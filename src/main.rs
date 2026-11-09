@@ -35,7 +35,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     spawn,
     sync::{Semaphore, SemaphorePermit},
-    task::block_in_place,
+    task::spawn_blocking,
     time::sleep,
 };
 use tokio_util::io::ReaderStream;
@@ -589,7 +589,14 @@ async fn stats_view(State(app): State<Arc<App>>) -> Json<Value> {
 
 async fn prune_store_forever(dir: PathBuf, label: &'static str, kept: Duration) -> ! {
     loop {
-        match block_in_place(|| prune_store(&dir, SystemTime::now(), kept)) {
+        match spawn_blocking({
+            let store = dir.clone();
+            move || prune_store(&store, SystemTime::now(), kept)
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|pruned| pruned)
+        {
             Ok((units, blobs)) if units + blobs > 0 => {
                 eprintln!(
                     "warmd: {label}: removed {units} entries unused for {}h and {blobs} unreferenced blobs",

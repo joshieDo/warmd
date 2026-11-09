@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_str, json};
 use tokio::{
     fs::{copy, create_dir_all, read_dir, read_to_string, remove_dir_all, symlink_metadata, write},
-    task::block_in_place,
+    task::spawn_blocking,
 };
 use uuid::Uuid;
 
@@ -416,8 +416,15 @@ pub(crate) async fn run(
         None => (layer.to_owned(), None),
     };
     let outcome = check(repo, full, req, &layer, running, progress, &mut clock).await;
-    if let Err(err) = block_in_place(|| sandbox::harvest_rustc_cache(&layer)) {
-        eprintln!("warmd: {}: keeping the rustc cache's new entries: {err:#}", repo.name());
+    match spawn_blocking({
+        let from = layer.clone();
+        move || sandbox::harvest_rustc_cache(&from)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => eprintln!("warmd: {}: keeping the rustc cache's new entries: {err:#}", repo.name()),
+        Err(err) => eprintln!("warmd: {}: keeping the rustc cache's new entries: {err}", repo.name()),
     }
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
     if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(_) | Outcome::Built(_))) {
