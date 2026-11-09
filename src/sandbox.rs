@@ -138,6 +138,8 @@ impl Sandbox<'_> {
                 }
                 bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
                 bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
+
+                bwrap.args(["--setenv", "SLAPSLOP_DEPCACHE", "0"]);
                 bwrap.arg("--overlay-src").arg(lower);
                 if let Some(layer) = RUSTC_LAYER.get() {
                     bwrap.arg("--overlay-src").arg(layer);
