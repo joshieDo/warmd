@@ -119,11 +119,15 @@ fn sweep_incremental(dir: &Path, cutoff: SystemTime) -> anyhow::Result<usize> {
 fn used_since(dir: &Path, cutoff: SystemTime) -> anyhow::Result<bool> {
     for path in once(dir.to_owned()).chain(children(dir)?) {
         let Some(meta) = metadata(&path)? else { continue };
-        if meta.accessed()?.max(meta.modified()?) >= cutoff {
+        if last_use(&meta)? >= cutoff {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn last_use(meta: &Metadata) -> anyhow::Result<SystemTime> {
+    if meta.is_dir() { Ok(meta.modified()?) } else { Ok(meta.accessed()?.max(meta.modified()?)) }
 }
 
 fn unit_hash(name: &str) -> Option<&str> {
