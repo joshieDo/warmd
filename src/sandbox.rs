@@ -138,8 +138,6 @@ impl Sandbox<'_> {
                 }
                 bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
                 bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
-
-                bwrap.args(["--setenv", "SLAPSLOP_DEPCACHE", "0"]);
                 bwrap.arg("--overlay-src").arg(lower);
                 if let Some(layer) = RUSTC_LAYER.get() {
                     bwrap.arg("--overlay-src").arg(layer);
@@ -147,6 +145,8 @@ impl Sandbox<'_> {
                 bwrap.arg("--overlay").arg(layer.join("upper")).arg(layer.join("work")).arg(&work);
             }
         }
+
+        bwrap.args(["--setenv", "SLAPSLOP_DEPCACHE", "0"]);
         bwrap.args(["--setenv", "SLAPSLOP_CACHE", &format!("{work}/{SLAPSLOP_CACHE}")]);
         if RUSTC_LAYER.get().is_some() {
             let wrapper = env::current_exe()?.with_file_name("warmd-rustc");

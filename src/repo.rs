@@ -35,7 +35,7 @@ use crate::{
     ra::Tier1,
     sandbox::{Sandbox, Tree},
     stats::now_secs,
-    sweep::Swept,
+    sweep::{Swept, expire},
 };
 
 const SESSION_IDLE: Duration = Duration::from_mins(30);
@@ -569,8 +569,16 @@ impl Repo {
     }
 
     async fn sweep(&self, tree: &Path, built_at: SystemTime) {
-        let (target, name) = (tree.join("target"), self.name.clone());
-        match spawn_blocking(move || Swept::sweep(&target, built_at.checked_sub(RETENTION).unwrap_or(built_at))).await {
+        let (target, name, hits) = (tree.join("target"), self.name.clone(), self.cache_dir().join("slapslop/hits"));
+        let cutoff = built_at.checked_sub(RETENTION).unwrap_or(built_at);
+        match spawn_blocking(move || expire(&hits, cutoff)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(removed)) => eprintln!("warmd: {name}: removed {removed} old slapslop hit files"),
+            Ok(Err(err)) => eprintln!("warmd: {name}: expiring slapslop hits: {err:#}"),
+            Err(err) => eprintln!("warmd: {name}: expiring slapslop hits: {err}"),
+        }
+        let name = self.name.clone();
+        match spawn_blocking(move || Swept::sweep(&target, cutoff)).await {
             Ok(Ok(swept)) if swept.units + swept.incremental > 0 => eprintln!(
                 "warmd: {name}: removed {} unused build units and {} incremental dirs",
                 swept.units, swept.incremental

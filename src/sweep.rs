@@ -30,6 +30,25 @@ impl Swept {
     }
 }
 
+pub(crate) fn expire(dir: &Path, cutoff: SystemTime) -> anyhow::Result<usize> {
+    expire_within(dir, cutoff, DEPTH)
+}
+
+fn expire_within(dir: &Path, cutoff: SystemTime, depth: usize) -> anyhow::Result<usize> {
+    let mut removed = 0;
+    for entry in children(dir)? {
+        if entry.is_dir() && !entry.is_symlink() {
+            if depth > 0 {
+                removed += expire_within(&entry, cutoff, depth - 1)?;
+            }
+        } else if metadata(&entry)?.map(|meta| meta.modified()).transpose()?.is_some_and(|at| at < cutoff) {
+            remove(&entry)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn walk(dir: &Path, cutoff: SystemTime, depth: usize, swept: &mut Swept) -> anyhow::Result<()> {
     for entry in children(dir)? {
         if !entry.is_dir() || entry.is_symlink() {
