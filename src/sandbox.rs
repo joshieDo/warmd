@@ -38,6 +38,10 @@ const SLAPSLOP_RAN: &str = concat!(
     "| cut -d' ' -f1 | grep . || grep -cE '^ +(Checking|Compiling) ' target/slapslop/build.log 2>/dev/null || true; }"
 );
 
+/// Drops every `SLAPSLOP_*` variable (the remote cache, the cache dir, the depcache switch) before a test job, so
+/// a repo's tests see the environment its CI gives them.
+const UNSET_SLAPSLOP: &str = "unset $(env | sed -n 's/^\\(SLAPSLOP_[A-Za-z0-9_]*\\)=.*/\\1/p'); ";
+
 /// Where a lanes run's results directory is bound in the sandbox.
 const RESULTS: &str = "/tmp/warmd-results";
 
@@ -376,7 +380,8 @@ fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
             if job.slapslop {
                 script.push_str(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl\n"));
             }
-            script.push_str(&format!("( {} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
+            let clean = if job.test { UNSET_SLAPSLOP } else { "" };
+            script.push_str(&format!("( {clean}{} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
             if job.slapslop {
                 script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
                 script.push_str(&format!("{SLAPSLOP_RAN} >{at}.ran\n"));
