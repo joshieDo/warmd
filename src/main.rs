@@ -68,7 +68,7 @@ const SECS_PER_HOUR: u64 = 3600;
 
 const PRUNE_EVERY: Duration = Duration::from_hours(1);
 
-const DAY: Duration = Duration::from_hours(24);
+const RETENTION: Duration = Duration::from_hours(48);
 
 const STRAY_AFTER: Duration = Duration::from_hours(1);
 
@@ -228,14 +228,10 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     if let Some(store) = sandbox::use_rustc_cache(config.state_dir.join("rustc"))? {
-        spawn(prune_store_forever(store, "rustc cache", DAY));
+        spawn(prune_store_forever(store, "rustc cache", RETENTION));
     }
     if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
-        spawn(prune_store_forever(
-            PathBuf::from(remote).join("v1"),
-            "slapslop store",
-            Duration::from_secs(RETAIN_SECS),
-        ));
+        spawn(prune_store_forever(PathBuf::from(remote).join("v1"), "slapslop store", RETENTION));
     }
     spawn(dispatch_forever(Arc::clone(&app)));
     spawn(remote::poll_capacity_forever(Arc::clone(&app)));
