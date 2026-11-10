@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     iter::once,
     path::{Path, PathBuf},
     sync::{
@@ -39,6 +39,9 @@ use crate::{
 };
 
 const SESSION_IDLE: Duration = Duration::from_mins(30);
+
+/// The most generations a repo keeps, its current one included, unless a running job holds an older one.
+const KEPT_GENS: usize = 3;
 
 pub(crate) type Baseline = BTreeMap<String, Vec<Diag>>;
 
@@ -532,7 +535,7 @@ impl Repo {
             gens.retain(|generation| {
                 index += 1;
                 let stays = index == count
-                    || (generation.born.elapsed().is_ok_and(|age| age < keep))
+                    || (count - index < KEPT_GENS && generation.born.elapsed().is_ok_and(|age| age < keep))
                     || Arc::strong_count(generation) > 1;
                 if !stays {
                     doomed.push(generation.sha.clone());
@@ -833,18 +836,29 @@ fn measure_blocks(gens: &[Arc<Gen>]) -> anyhow::Result<()> {
 fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path, &Path) -> anyhow::Result<()>) -> anyhow::Result<()> {
     let mut dirs = vec![root.to_owned()];
     while let Some(dir) = dirs.pop() {
-        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                dirs.push(entry.path());
-            } else if kind.is_file() {
-                let path = entry.path();
-                visit(path.strip_prefix(root).unwrap_or(&path), &path)?;
+        for entry in match fs::read_dir(&dir) {
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            entries => entries.with_context(|| format!("reading {}", dir.display()))?,
+        } {
+            match match entry.and_then(|entry| Ok((entry.file_type()?, entry.path()))) {
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                kind => kind?,
+            } {
+                (kind, path) if kind.is_dir() => dirs.push(path),
+                (kind, path) if kind.is_file() => match visit(path.strip_prefix(root).unwrap_or(&path), &path) {
+                    Err(err) if vanished(&err) => {}
+                    visited => visited?,
+                },
+                _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// Whether the walk hit a file a running job removed under it: such a file is not measured.
+fn vanished(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.downcast_ref::<io::Error>().is_some_and(|io| io.kind() == ErrorKind::NotFound))
 }
 
 fn part_of(
