@@ -828,9 +828,10 @@ async fn run_step(sandbox: Sandbox<'_>, step: &Step, repo: &Repo, packages: &str
                     .stdout,
             ))
         }
-        Step::Slapslop { args } => {
-            Ok(sandbox.slapslop(&format!("cargo-slapslop run \"$PWD\" --diff HEAD~1 {}", args.join(" "))).await?.1)
-        }
+        Step::Slapslop { args } => Ok(sandbox
+            .slapslop(&format!("SLAPSLOP_FAST=1 cargo-slapslop run \"$PWD\" --diff HEAD~1 {}", args.join(" ")))
+            .await?
+            .1),
     }
 }
 
