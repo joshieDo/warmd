@@ -450,7 +450,9 @@ pub(crate) async fn run(
         if let Err(err) = write(layer.join("meta.json"), meta).await {
             eprintln!("warmd: {}: {err:#}", repo.name());
         }
-    } else if let Err(err) = repo::remove_tree(&layer).await {
+    } else if session_guard.is_some() && layer.join("meta.json").exists() {
+        // A failed check (a patch that does not apply, say) keeps the branch's warm build it ran on.
+    } else if let Err(err) = repo.discard(&layer).await {
         eprintln!("warmd: {}: {err:#}", repo.name());
     }
     clock.mark("cleanup");

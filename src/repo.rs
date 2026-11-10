@@ -25,6 +25,7 @@ use tokio::{
     task::spawn_blocking,
     time::sleep,
 };
+use uuid::Uuid;
 
 use crate::{
     RETENTION,
@@ -42,6 +43,9 @@ const SESSION_IDLE: Duration = Duration::from_mins(30);
 
 /// The most generations a repo keeps, its current one included, unless a running job holds an older one.
 const KEPT_GENS: usize = 3;
+
+/// The most branch sessions (warm builds of a branch) a repo keeps, busy ones included.
+const KEPT_SESSIONS: usize = 4;
 
 pub(crate) type Baseline = BTreeMap<String, Vec<Diag>>;
 
@@ -176,10 +180,11 @@ impl Repo {
         let live = self.gens().iter().map(|generation| generation.sha.clone()).collect::<Vec<_>>();
         let names = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect::<Vec<_>>();
         let mut views = Vec::with_capacity(names.len());
+        let (mut idle_kept, mut busy) = (Vec::new(), 0_usize);
         for name in names {
             // A session in use (a check queued or running on it) is skipped, so a long check never holds up
             // this repo's main poll; it is looked at again next poll.
-            let Some((dir, _guard)) = self.try_session(&name) else {
+            let Some((dir, guard)) = self.try_session(&name) else {
                 views.extend(
                     self.session_views
                         .lock()
@@ -188,6 +193,7 @@ impl Repo {
                         .filter(|view| session_key(&view.name) == name)
                         .cloned(),
                 );
+                busy += 1;
                 continue;
             };
             let meta = read_to_string(dir.join("meta.json")).await.ok().and_then(|text| from_str::<Value>(&text).ok());
@@ -196,11 +202,20 @@ impl Repo {
                 used + idle.as_secs() < now_secs() || !live.iter().any(|sha| meta["gen"] == sha.as_str())
             });
             if stale {
-                remove_tree(&dir).await?;
+                self.discard(&dir).await?;
                 self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
             } else if let Some(meta) = meta {
+                let used = meta["used_at"].as_u64().unwrap_or_default();
+                idle_kept.push(IdleSession { used, name: name.clone(), dir, _guard: guard });
                 views.push(SessionView::of(name, &meta, idle, live.last()));
             }
+        }
+        // Past the cap, the least recently used idle sessions go: a busy one counts but stays.
+        idle_kept.sort_by_key(|idle| Reverse(idle.used));
+        for IdleSession { name, dir, .. } in idle_kept.into_iter().skip(KEPT_SESSIONS - busy.min(KEPT_SESSIONS)) {
+            self.discard(&dir).await?;
+            self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
+            views.retain(|view| session_key(&view.name) != name);
         }
         views.sort_by_key(|view| Reverse(view.bytes));
         *self.session_views.lock().unwrap_or_else(PoisonError::into_inner) = views;
@@ -208,6 +223,21 @@ impl Repo {
         if symlink_metadata(&cache).await.is_ok() {
             self.cache_bytes.store(dir_bytes(&cache).await?, Ordering::Relaxed);
         }
+        Ok(())
+    }
+
+    /// Moves a tree out of the way at once and removes it in the background, so no job waits on a large `rm`.
+    pub(crate) async fn discard(&self, tree: &Path) -> anyhow::Result<()> {
+        if symlink_metadata(tree).await.is_err() {
+            return Ok(());
+        }
+        let trash = self.jobs_dir.join(format!(".trash-{}", Uuid::new_v4()));
+        rename(tree, &trash).await.with_context(|| format!("moving {} aside", tree.display()))?;
+        spawn(async move {
+            if let Err(err) = remove_tree(&trash).await {
+                eprintln!("warmd: removing {}: {err:#}", trash.display());
+            }
+        });
         Ok(())
     }
 
@@ -652,6 +682,14 @@ pub(crate) struct View {
     sessions: Vec<SessionView>,
     cache_bytes: Option<u64>,
     tier1: Value,
+}
+
+/// An idle session `prune_sessions` holds locked while it decides whether the cap drops it.
+struct IdleSession {
+    used: u64,
+    name: String,
+    dir: PathBuf,
+    _guard: OwnedMutexGuard<()>,
 }
 
 #[derive(Debug, Clone, Serialize)]
