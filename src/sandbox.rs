@@ -32,6 +32,12 @@ const MOUNT_RETRY: Duration = Duration::from_millis(50);
 
 const SLAPSLOP_CACHE: &str = "target/slapslop";
 
+/// Prints how many units slapslop's check pass ran: its fast-mode summary, else the crates cargo checked.
+const SLAPSLOP_RAN: &str = concat!(
+    "{ grep -hoE 'unit\\(s\\) fresh, [0-9]+ run' target/slapslop/build.log 2>/dev/null | tail -1 | grep -oE '[0-9]+ run$' ",
+    "| cut -d' ' -f1 | grep . || grep -cE '^ +(Checking|Compiling) ' target/slapslop/build.log 2>/dev/null || true; }"
+);
+
 /// Where a lanes run's results directory is bound in the sandbox.
 const RESULTS: &str = "/tmp/warmd-results";
 
@@ -85,6 +91,7 @@ impl Sandbox<'_> {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             cpu_secs: None,
+            slapslop_ran: None,
         })
     }
 
@@ -199,6 +206,11 @@ impl Sandbox<'_> {
                         stdout: result(&dir, index, "out")?,
                         stderr: result(&dir, index, "err")?,
                         cpu_secs: None,
+                        slapslop_ran: if job.job.slapslop {
+                            result(&dir, index, "ran")?.trim().parse().ok()
+                        } else {
+                            None
+                        },
                     }
                     .with_cpu();
                     let found = if job.job.slapslop {
@@ -267,6 +279,8 @@ pub(crate) struct Output {
     pub(crate) stderr: String,
     /// User plus system CPU seconds of the command and everything it ran (the shell's `times`).
     pub(crate) cpu_secs: Option<f64>,
+    /// The units slapslop's check pass ran (not fresh), from its build.log; none for other jobs.
+    pub(crate) slapslop_ran: Option<u32>,
 }
 
 impl Output {
@@ -365,6 +379,7 @@ fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
             script.push_str(&format!("( {} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
             if job.slapslop {
                 script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
+                script.push_str(&format!("{SLAPSLOP_RAN} >{at}.ran\n"));
             }
             script.push_str(&format!("echo {DONE_MARK}{index}\n"));
         }
