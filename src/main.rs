@@ -70,6 +70,8 @@ const PRUNE_EVERY: Duration = Duration::from_hours(1);
 
 const RETENTION: Duration = Duration::from_hours(48);
 
+const SLAPSLOP_RETENTION: Duration = Duration::from_hours(24);
+
 const STRAY_AFTER: Duration = Duration::from_hours(1);
 
 const O_NOATIME: i32 = 0o1_000_000;
@@ -231,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
         spawn(prune_store_forever(store, "rustc cache", RETENTION));
     }
     if let Some(remote) = env::var_os("SLAPSLOP_REMOTE_CACHE").filter(|dir| !dir.is_empty()) {
-        spawn(prune_store_forever(PathBuf::from(remote).join("v1"), "slapslop store", RETENTION));
+        spawn(prune_store_forever(PathBuf::from(remote).join("v1"), "slapslop store", SLAPSLOP_RETENTION));
     }
     spawn(dispatch_forever(Arc::clone(&app)));
     spawn(remote::poll_capacity_forever(Arc::clone(&app)));
