@@ -54,7 +54,6 @@ mod balance;
 mod check;
 mod config;
 mod diag;
-mod evidence;
 mod hits_view;
 mod lanes;
 mod metrics;

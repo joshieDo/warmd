@@ -38,14 +38,6 @@ const SLAPSLOP_RAN: &str = concat!(
     "| cut -d' ' -f1 | grep . || grep -cE '^ +(Checking|Compiling) ' target/slapslop/build.log 2>/dev/null || true; }"
 );
 
-/// Notes the slapslop job's load, cpus and `SLAPSLOP_*` environment before it runs, for the evidence a check keeps.
-const EVIDENCE_START: &str = "E=target/slapslop/.warmd-evidence; rm -rf $E; mkdir -p $E; cat /proc/loadavg >$E/load-start; \\
-     nproc >$E/cpus; env | grep '^SLAPSLOP_' >$E/env\n";
-
-/// Notes the load after the slapslop job and which line its unit count came from.
-const EVIDENCE_END: &str = "cat /proc/loadavg >$E/load-end; if grep -qE 'unit\\(s\\) fresh, [0-9]+ run' \\
-     target/slapslop/build.log 2>/dev/null; then echo fast-units; else echo checking-lines; fi >$E/rebuilt-method\n";
-
 /// Drops every `SLAPSLOP_*` variable (the remote cache, the cache dir, the depcache switch) before a test job, so
 /// a repo's tests see the environment its CI gives them.
 const UNSET_SLAPSLOP: &str = "unset $(env | sed -n 's/^\\(SLAPSLOP_[A-Za-z0-9_]*\\)=.*/\\1/p'); ";
@@ -387,14 +379,12 @@ fn lanes_script(lanes: &[Vec<LaneJob<'_>>]) -> String {
             let at = format!("{RESULTS}/{index}");
             if job.slapslop {
                 script.push_str(&format!("rm -f {SLAPSLOP_CACHE}/hits.jsonl\n"));
-                script.push_str(EVIDENCE_START);
             }
             let clean = if job.test { UNSET_SLAPSLOP } else { "" };
             script.push_str(&format!("( {clean}{} ) >{at}.out 2>{at}.err\necho $? >{at}.code\n", timed(cmd)));
             if job.slapslop {
                 script.push_str(&format!("cat {SLAPSLOP_CACHE}/hits.jsonl >{at}.hits 2>/dev/null || true\n"));
                 script.push_str(&format!("{SLAPSLOP_RAN} >{at}.ran\n"));
-                script.push_str(&format!("cp {at}.out $E/stdout; cp {at}.err $E/stderr; {EVIDENCE_END}"));
             }
             script.push_str(&format!("echo {DONE_MARK}{index}\n"));
         }

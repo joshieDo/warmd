@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::{
     config::{ArgsOverride, Binary, FULL_CLIPPY, Profile, RepoCfg, Step, Tests},
     diag::{self, Diag},
-    evidence, lanes,
+    lanes,
     metrics::{self, Clock, Phase},
     repo::{self, Repo},
     sandbox::{self, Sandbox, Tree},
@@ -415,7 +415,6 @@ pub(crate) async fn run(
     progress: impl Fn(Value),
 ) -> (anyhow::Result<Outcome>, Vec<Phase>) {
     let mut clock = Clock::start();
-    let started_at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64());
     let load_at_start = read_to_string("/proc/loadavg")
         .await
         .ok()
@@ -423,7 +422,6 @@ pub(crate) async fn run(
     let kind = req.kind();
     let (base, branch, dirty) = (req.base.sha.clone(), req.branch.clone(), !req.patch.trim().is_empty());
     let request = req.summary(&repo.cfg());
-    let layer_id = layer.file_name().map(|name| name.to_string_lossy().into_owned());
     let session_name = req.session.clone().filter(|_| !req.full_only);
     let (layer, session_guard) = match session_name.clone() {
         Some(name) => {
@@ -445,26 +443,6 @@ pub(crate) async fn run(
         Err(err) => eprintln!("warmd: {}: keeping the rustc cache's new entries: {err}", repo.name()),
     }
     let layer_bytes = repo::dir_bytes(&layer.join("upper")).await.ok();
-    if let Ok(Outcome::Checked(report)) = &outcome {
-        let warmth = report.metrics();
-        let real = branch.as_deref().is_some_and(|name| !name.starts_with("probe/"));
-        if repo.name() == "tempo" && kind == "check" && real && !warmth["cpu_secs"]["slapslop"].is_null() {
-            let id = layer_id.as_deref().unwrap_or_default();
-            let check = evidence::Check {
-                id,
-                branch: branch.as_deref(),
-                base: &base,
-                started_at,
-                phases: clock.phases(),
-                warmth: &warmth,
-            };
-            if let Err(err) =
-                evidence::keep(repo.metrics_file().parent().unwrap_or_else(|| Path::new(".")), &layer, &check).await
-            {
-                eprintln!("warmd: {}: keeping slapslop evidence: {err:#}", repo.name());
-            }
-        }
-    }
     if session_guard.is_some() && matches!(&outcome, Ok(Outcome::Checked(_) | Outcome::Built(_))) {
         let built_on = outcome.as_ref().ok().and_then(Outcome::ran_on);
         let meta = json!({ "gen": built_on, "used_at": now_secs(), "session": session_name, "bytes": layer_bytes })

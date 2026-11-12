@@ -75,7 +75,7 @@ impl Clock {
         self.last.duration_since(self.started).as_secs_f64()
     }
 
-    pub(crate) fn phases(&self) -> &[Phase] {
+    fn phases(&self) -> &[Phase] {
         &self.phases
     }
 
