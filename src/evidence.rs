@@ -41,6 +41,10 @@ pub(crate) async fn keep(state: &Path, layer: &Path, check: &Check<'_>) -> anyho
     }
     let shell = dir.join("warmd-evidence");
     let read = async |name: &str| read_to_string(shell.join(name)).await.map(|text| text.trim().to_owned()).ok();
+    let fast_exit_kinds = read_to_string(dir.join("perf/fast-exits.tsv"))
+        .await
+        .map(|text| text.lines().filter_map(|line| line.split('\t').nth(1).map(str::to_owned)).collect::<Vec<_>>())
+        .ok();
     let meta = json!({
         "job_id": check.id,
         "branch": check.branch,
@@ -55,6 +59,7 @@ pub(crate) async fn keep(state: &Path, layer: &Path, check: &Check<'_>) -> anyho
         "load_at_slapslop_end": read("load-end").await,
         "cpus": read("cpus").await,
         "slapslop_env": read("env").await,
+        "fast_exit_kinds": fast_exit_kinds,
         "warmth": check.warmth,
     });
     write(dir.join("meta.json"), to_vec_pretty(&meta)?).await?;
