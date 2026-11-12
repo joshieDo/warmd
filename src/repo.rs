@@ -784,6 +784,19 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     checked(Command::new("git").arg("-C").arg(dir).args(args)).await
 }
 
+/// The installed slapslop's version line, none when it does not run.
+pub(crate) async fn installed_slapslop() -> Option<String> {
+    let out = Command::new("sh")
+        .args(["-c", r#"cargo-slapslop --version && cat "$(dirname "$(readlink -f "$(command -v cargo-slapslop)")")/../BUILD" 2>/dev/null; true"#])
+        .output()
+        .await
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| line.starts_with("cargo-slapslop"))
+}
+
 /// Clears a repo's jobs dir after a restart but keeps its sessions (a branch's warm build), so a deploy costs no warmth.
 async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<sync::Mutex<()>>>> {
     let mut kept = HashMap::new();
@@ -821,19 +834,6 @@ async fn keep_sessions(jobs_dir: &Path) -> anyhow::Result<HashMap<String, Arc<sy
 /// with two locks.
 fn session_key(name: &str) -> String {
     name.bytes().map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte) } else { '_' }).collect()
-}
-
-/// The installed slapslop's version line, none when it does not run.
-async fn installed_slapslop() -> Option<String> {
-    let out = Command::new("sh")
-        .args(["-c", r#"cargo-slapslop --version && cat "$(dirname "$(readlink -f "$(command -v cargo-slapslop)")")/../BUILD" 2>/dev/null; true"#])
-        .output()
-        .await
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| line.starts_with("cargo-slapslop"))
 }
 
 async fn measure(gens: Vec<Arc<Gen>>) {
