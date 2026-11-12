@@ -785,7 +785,7 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 /// The installed slapslop's version line, none when it does not run.
-async fn installed_slapslop() -> Option<String> {
+pub(crate) async fn installed_slapslop() -> Option<String> {
     let out = Command::new("sh")
         .args(["-c", r#"cargo-slapslop --version && cat "$(dirname "$(readlink -f "$(command -v cargo-slapslop)")")/../BUILD" 2>/dev/null; true"#])
         .output()
