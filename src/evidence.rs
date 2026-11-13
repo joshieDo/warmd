@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{metrics::Phase, repo, stats::now_secs};
 
-const KEPT: usize = 21;
+const KEPT: usize = 26;
 
 pub(crate) struct Check<'a> {
     pub(crate) id: &'a str,
