@@ -31,7 +31,7 @@ use crate::{
     RETENTION,
     config::{Job, RepoCfg},
     diag::{self, Diag},
-    lanes,
+    evidence, lanes,
     metrics::{self, Clock, Phase},
     ra::Tier1,
     sandbox::{Sandbox, Tree},
@@ -394,6 +394,9 @@ impl Repo {
             let phases = clock.into_phases();
             match built {
                 Ok(generation) => {
+                    if self.name == "tempo" {
+                        evidence::keep_main(&self.metrics_file, &generation.dir, &head, &phases, &stats).await;
+                    }
                     self.gens().push(Arc::new(generation));
                     spawn(measure(self.gens().clone()));
                     self.set_status(State::Ready, &head, None, phases);
@@ -454,6 +457,9 @@ impl Repo {
         let fields = json!({ "repo": self.name, "sha": current.sha, "ok": ran.is_ok(), "jobs": stats, "rescan": tool });
         metrics::record(&self.metrics_file, "build", fields, &clock).await;
         ran?;
+        if self.name == "tempo" {
+            evidence::keep_main(&self.metrics_file, &current.dir, &current.sha, clock.phases(), &stats).await;
+        }
         let sha = &current.sha;
         write(self.gens_dir.join(format!("{sha}.json")), to_vec(&baseline)?).await?;
         write(self.gens_dir.join(format!("{sha}.broken.json")), to_vec(&broken)?).await?;

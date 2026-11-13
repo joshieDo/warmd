@@ -458,8 +458,12 @@ pub(crate) async fn run(
                 phases: clock.phases(),
                 warmth: &warmth,
             };
-            if let Err(err) =
-                evidence::keep(repo.metrics_file().parent().unwrap_or_else(|| Path::new(".")), &layer, &check).await
+            if let Err(err) = evidence::keep(
+                repo.metrics_file().parent().unwrap_or_else(|| Path::new(".")),
+                &layer.join("upper/target/slapslop"),
+                &check,
+            )
+            .await
             {
                 eprintln!("warmd: {}: keeping slapslop evidence: {err:#}", repo.name());
             }

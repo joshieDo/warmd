@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use serde_json::{Value, json, to_vec_pretty};
 use tokio::{
@@ -6,7 +6,7 @@ use tokio::{
     process::Command,
 };
 
-use crate::{metrics::Phase, repo};
+use crate::{metrics::Phase, repo, stats::now_secs};
 
 const KEPT: usize = 21;
 
@@ -19,7 +19,7 @@ pub(crate) struct Check<'a> {
     pub(crate) warmth: &'a Value,
 }
 
-pub(crate) async fn keep(state: &Path, layer: &Path, check: &Check<'_>) -> anyhow::Result<()> {
+pub(crate) async fn keep(state: &Path, from: &Path, check: &Check<'_>) -> anyhow::Result<()> {
     let root = state.join("slapslop-evidence");
     create_dir_all(&root).await?;
     let mut entries = read_dir(&root).await?;
@@ -32,7 +32,6 @@ pub(crate) async fn keep(state: &Path, layer: &Path, check: &Check<'_>) -> anyho
     }
     let dir = root.join(check.id);
     create_dir_all(&dir).await?;
-    let from = layer.join("upper/target/slapslop");
     for part in ["build.log", "perf", ".warmd-evidence"] {
         let source = from.join(part);
         if source.exists() {
@@ -64,4 +63,27 @@ pub(crate) async fn keep(state: &Path, layer: &Path, check: &Check<'_>) -> anyho
     });
     write(dir.join("meta.json"), to_vec_pretty(&meta)?).await?;
     Ok(())
+}
+
+pub(crate) async fn keep_main(
+    metrics_file: &Path,
+    gen_dir: &Path,
+    sha: &str,
+    phases: &[Phase],
+    jobs: &BTreeMap<String, Value>,
+) {
+    let Some(slapslop) = jobs.get("slapslop") else {
+        return;
+    };
+    let id = format!("main-{}-{}", sha.get(..8).unwrap_or(sha), now_secs());
+    let warmth = json!({
+        "rebuilt": { "slapslop": slapslop["rebuilt"] },
+        "cpu_secs": { "slapslop": slapslop["cpu_secs"] },
+        "jobs": jobs,
+    });
+    let check = Check { id: &id, branch: None, base: sha, started_at: now_secs() as f64, phases, warmth: &warmth };
+    let state = metrics_file.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(err) = keep(state, &gen_dir.join("target/slapslop"), &check).await {
+        eprintln!("warmd: keeping slapslop evidence of main {sha}: {err:#}");
+    }
 }
