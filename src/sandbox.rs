@@ -75,48 +75,6 @@ const TUNE_DIR: &str = "/tmp/warmd-tune";
 /// The `cargo` [`TUNE_DIR`] holds: it adds a repo's rustc flags to the command's own and runs the real cargo.
 const CARGO_SHIM: &str = include_str!("cargo-shim.sh");
 
-/// The build environment of a repo's sandboxes, the same for main's builds and patches'.
-#[derive(Debug, Default)]
-pub(crate) struct Tuning {
-    /// Variables every command gets.
-    pub(crate) env: Vec<(String, String)>,
-    /// Variables the tuning owns but leaves out, removed so warmd's own environment does not reach the builds.
-    pub(crate) unset: Vec<String>,
-    /// rustc flags added to every cargo command's `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`, when it sets that).
-    pub(crate) rustflags: Vec<String>,
-    /// rustc flags added only when the cargo command's toolchain takes `-Z` options.
-    pub(crate) nightly_rustflags: Vec<String>,
-    /// Host tools the flags name, bound into trees that hide the home they may sit under.
-    pub(crate) tools: Vec<PathBuf>,
-}
-
-impl Tuning {
-    /// The script that installs [`TUNE_DIR`]'s `cargo`: it drops its directory from PATH, adds the flags to the
-    /// ones the command set, and runs the real cargo. None when there are no flags to add.
-    fn cargo_shim(&self) -> Option<String> {
-        if self.rustflags.is_empty() && self.nightly_rustflags.is_empty() {
-            return None;
-        }
-        let shim = CARGO_SHIM
-            .replace("{dir}", TUNE_DIR)
-            .replace("{flags}", &self.rustflags.join(" "))
-            .replace("{nightly}", &self.nightly_rustflags.join(" "));
-        Some(format!(
-            "mkdir -p {TUNE_DIR} && cat >{TUNE_DIR}/cargo <<'WARMD_TUNE' && chmod +x {TUNE_DIR}/cargo\n{shim}WARMD_TUNE\n"
-        ))
-    }
-}
-
-/// Makes every sandbox from now on build each repo with its tuning.
-pub(crate) fn set_tunings(tunings: impl IntoIterator<Item = (String, Tuning)>) {
-    *TUNINGS.lock().unwrap_or_else(PoisonError::into_inner) =
-        tunings.into_iter().map(|(repo, tuning)| (repo, Arc::new(tuning))).collect();
-}
-
-fn tuning(repo: &str) -> Arc<Tuning> {
-    TUNINGS.lock().unwrap_or_else(PoisonError::into_inner).get(repo).cloned().unwrap_or_default()
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sandbox<'a> {
     pub(crate) repo: &'a str,
@@ -338,6 +296,38 @@ impl Sandbox<'_> {
     }
 }
 
+/// The build environment of a repo's sandboxes, the same for main's builds and patches'.
+#[derive(Debug, Default)]
+pub(crate) struct Tuning {
+    /// Variables every command gets.
+    pub(crate) env: Vec<(String, String)>,
+    /// Variables the tuning owns but leaves out, removed so warmd's own environment does not reach the builds.
+    pub(crate) unset: Vec<String>,
+    /// rustc flags added to every cargo command's `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`, when it sets that).
+    pub(crate) rustflags: Vec<String>,
+    /// rustc flags added only when the cargo command's toolchain takes `-Z` options.
+    pub(crate) nightly_rustflags: Vec<String>,
+    /// Host tools the flags name, bound into trees that hide the home they may sit under.
+    pub(crate) tools: Vec<PathBuf>,
+}
+
+impl Tuning {
+    /// The script that installs [`TUNE_DIR`]'s `cargo`: it drops its directory from PATH, adds the flags to the
+    /// ones the command set, and runs the real cargo. None when there are no flags to add.
+    fn cargo_shim(&self) -> Option<String> {
+        if self.rustflags.is_empty() && self.nightly_rustflags.is_empty() {
+            return None;
+        }
+        let shim = CARGO_SHIM
+            .replace("{dir}", TUNE_DIR)
+            .replace("{flags}", &self.rustflags.join(" "))
+            .replace("{nightly}", &self.nightly_rustflags.join(" "));
+        Some(format!(
+            "mkdir -p {TUNE_DIR} && cat >{TUNE_DIR}/cargo <<'WARMD_TUNE' && chmod +x {TUNE_DIR}/cargo\n{shim}WARMD_TUNE\n"
+        ))
+    }
+}
+
 /// A job of a lanes run: its index in the plan, the job and the command it runs.
 #[derive(Debug)]
 pub(crate) struct LaneJob<'job> {
@@ -386,6 +376,12 @@ impl Output {
     pub(crate) fn tail(&self) -> String {
         tail_of(if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr }, TAIL_BYTES)
     }
+}
+
+/// Makes every sandbox from now on build each repo with its tuning.
+pub(crate) fn set_tunings(tunings: impl IntoIterator<Item = (String, Tuning)>) {
+    *TUNINGS.lock().unwrap_or_else(PoisonError::into_inner) =
+        tunings.into_iter().map(|(repo, tuning)| (repo, Arc::new(tuning))).collect();
 }
 
 pub(crate) fn work_path(repo: &str) -> String {
@@ -437,6 +433,10 @@ pub(crate) fn harvest_rustc_cache(layer: &Path) -> anyhow::Result<usize> {
         fs::remove_dir_all(&added).with_context(|| format!("removing {}", added.display()))?;
     }
     Ok(moved)
+}
+
+fn tuning(repo: &str) -> Arc<Tuning> {
+    TUNINGS.lock().unwrap_or_else(PoisonError::into_inner).get(repo).cloned().unwrap_or_default()
 }
 
 /// One file a job of a lanes run wrote to its results directory.

@@ -64,21 +64,21 @@ impl Config {
 pub(crate) struct Tune {
     /// Pins the build stamps (default true): `SOURCE_DATE_EPOCH` and `env`, so a build script stamping the time
     /// (vergen/smolgen's `VERGEN_BUILD_TIMESTAMP`) gives the same output on every build and its dependents stay warm.
-    pub(crate) stamps: Option<bool>,
+    stamps: Option<bool>,
     /// The `SOURCE_DATE_EPOCH` pinned stamps carry: default 315532800 (1980-01-01, the earliest date zip and wheel
     /// tools take), never a commit's time, which would change on every main.
-    pub(crate) source_date_epoch: Option<u64>,
+    source_date_epoch: Option<u64>,
     /// More variables pinned with the stamps (a repo's are added to the top level's), such as `VERGEN_GIT_SHA`.
-    pub(crate) env: Option<BTreeMap<String, String>>,
+    env: Option<BTreeMap<String, String>>,
     /// The linker clang links with (`--ld-path`), a name on PATH or a path: default `mold`, empty for the default
     /// linker, which is also used when it or `cc` is not installed.
-    pub(crate) linker: Option<String>,
+    linker: Option<String>,
     /// The C compiler that drives the link, a name on PATH or a path: default `clang`.
-    pub(crate) cc: Option<String>,
+    cc: Option<String>,
     /// rustc's front-end threads (`-Zthreads`), for nightly toolchains only: default 8, 0 for none.
-    pub(crate) threads: Option<u32>,
+    threads: Option<u32>,
     /// Keeps the dev and test profiles' debug info (default false: `CARGO_PROFILE_{DEV,TEST}_DEBUG=false`).
-    pub(crate) debuginfo: Option<bool>,
+    debuginfo: Option<bool>,
 }
 
 impl Tune {
@@ -136,18 +136,6 @@ impl Tune {
         let nightly_rustflags = if threads == 0 { Vec::new() } else { vec![format!("-Zthreads={threads}")] };
         Tuning { env, unset, rustflags, nightly_rustflags, tools }
     }
-}
-
-/// Where `name` is: itself when it holds a `/`, else the first match on PATH; none when it is not a file, or its
-/// path holds whitespace, which a `RUSTFLAGS` entry cannot.
-fn find_tool(name: &str) -> Option<PathBuf> {
-    let found = if name.contains('/') {
-        Some(PathBuf::from(name)).filter(|path| path.is_file())
-    } else {
-        env::var_os("PATH")
-            .and_then(|path| env::split_paths(&path).map(|dir| dir.join(name)).find(|path| path.is_file()))
-    }?;
-    (!found.to_string_lossy().contains(char::is_whitespace)).then_some(found)
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,6 +351,18 @@ impl Binary {
         }
         cmd
     }
+}
+
+/// Where `name` is: itself when it holds a `/`, else the first match on PATH; none when it is not a file, or its
+/// path holds whitespace, which a `RUSTFLAGS` entry cannot.
+fn find_tool(name: &str) -> Option<PathBuf> {
+    let found = if name.contains('/') {
+        Some(PathBuf::from(name)).filter(|path| path.is_file())
+    } else {
+        env::var_os("PATH")
+            .and_then(|path| env::split_paths(&path).map(|dir| dir.join(name)).find(|path| path.is_file()))
+    }?;
+    (!found.to_string_lossy().contains(char::is_whitespace)).then_some(found)
 }
 
 /// Why `name` is not a package or target name, if it is not.

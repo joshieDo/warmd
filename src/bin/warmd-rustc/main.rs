@@ -16,9 +16,6 @@
 //! since what rustc writes from an earlier session is never what it writes from nothing.
 #![forbid(unsafe_code)]
 
-mod digest;
-mod store;
-
 use std::{
     env,
     ffi::OsString,
@@ -37,6 +34,9 @@ use crate::{
     digest::Key,
     store::{Compiled, Store},
 };
+
+mod digest;
+mod store;
 
 /// Changing it starts a fresh key space.
 const VERSION: &str = "warmd-rustc 2";
@@ -111,9 +111,7 @@ impl Unit {
                     }
                 }
                 ("-o" | "--print" | "-" | "--test", _) => return None,
-                (input, None)
-                    if !input.starts_with('-') && Path::new(input).extension().is_some_and(|ext| ext == "rs") =>
-                {
+                (input, None) if !input.starts_with('-') && store::has_extension(Path::new(input), "rs") => {
                     inputs += 1;
                 }
                 _ => {}
@@ -297,13 +295,13 @@ mod tests {
 
     use super::*;
 
+    const LIB: &str =
+        "--crate-name demo --edition=2024 src/lib.rs --error-format=json --emit=dep-info,metadata,link --out-dir out";
+
     fn unit(args: &str) -> Option<Unit> {
         let args = args.split(' ').map(OsString::from).collect::<Vec<_>>();
         Unit::of(&OsString::from("rustc"), &args, Path::new("/nonexistent"))
     }
-
-    const LIB: &str =
-        "--crate-name demo --edition=2024 src/lib.rs --error-format=json --emit=dep-info,metadata,link --out-dir out";
 
     #[test]
     fn libraries_executables_and_c_libraries_are_cached() {

@@ -16,9 +16,11 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Write as _},
+    mem,
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
+    str::from_utf8,
     time::{Duration, SystemTime},
 };
 
@@ -29,45 +31,13 @@ use serde_json::{from_slice, to_vec};
 use crate::digest::{self, DIR_MARK, Key};
 
 /// The layout's directory: changing it starts an empty store.
-pub(crate) const LAYOUT: &str = "v2";
+const LAYOUT: &str = "v2";
 
 /// How many of a pre-key's manifests a lookup tries, newest first.
 const MANIFESTS: usize = 64;
 
 /// How far behind the precise clock a filesystem's timestamps may lag.
 const CLOCK_LAG: Duration = Duration::from_millis(20);
-
-/// One compile that rustc finished, to be stored.
-pub(crate) struct Compiled<'a> {
-    pub(crate) dep_info: &'a Path,
-    pub(crate) out_dir: &'a Path,
-    pub(crate) stem: &'a str,
-    pub(crate) started: SystemTime,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Entry {
-    outputs: Vec<Output>,
-    stdout: String,
-    stderr: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Output {
-    name: String,
-    blob: String,
-    link: bool,
-}
-
-/// What a compile read beyond its pre-key: files by path and digest, in rustc's order, and the variables `env!` and
-/// `option_env!` looked up (none for one that was unset).
-#[derive(Serialize, Deserialize)]
-struct Manifest {
-    files: Vec<(String, String)>,
-    env: BTreeMap<String, Option<String>>,
-}
 
 pub(crate) struct Store {
     root: PathBuf,
@@ -82,9 +52,7 @@ impl Store {
     pub(crate) fn toolchain(&self, rustc: &OsStr) -> anyhow::Result<String> {
         let path =
             toolchain_id(rustc).map(|id| self.root.join("toolchains").join(digest::hex(&digest::bytes(id.as_bytes()))));
-        if let Some(path) = &path
-            && let Ok(text) = fs::read_to_string(path)
-        {
+        if let Some(text) = path.as_ref().and_then(|path| remembered(path)) {
             return Ok(text);
         }
         let out = Command::new(rustc).arg("-vV").stderr(Stdio::null()).output()?;
@@ -133,7 +101,7 @@ impl Store {
             } else {
                 copy(&blob, &to)?;
             }
-            digest::remember(&to, &digest);
+            let _gone_since_written = digest::remember(&to, &digest);
         }
         io::stdout().write_all(entry.stdout.as_bytes())?;
         io::stderr().write_all(entry.stderr.as_bytes())?;
@@ -173,9 +141,9 @@ impl Store {
                 } else {
                     copy(&path, &blob)?;
                 }
-                digest::remember(&blob, &digest);
+                let _gone_since_written = digest::remember(&blob, &digest);
             }
-            digest::remember(&path, &digest);
+            let _gone_since_written = digest::remember(&path, &digest);
             outputs.push(Output { name, blob: blob_name, link });
         }
         let entry = Entry { outputs, stdout: compiled.stdout, stderr: compiled.stderr };
@@ -208,6 +176,38 @@ impl Store {
     fn blob(&self, name: &str) -> PathBuf {
         self.root.join("blobs").join(name)
     }
+}
+
+/// One compile that rustc finished, to be stored.
+pub(crate) struct Compiled<'a> {
+    pub(crate) dep_info: &'a Path,
+    pub(crate) out_dir: &'a Path,
+    pub(crate) stem: &'a str,
+    pub(crate) started: SystemTime,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Entry {
+    outputs: Vec<Output>,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Output {
+    name: String,
+    blob: String,
+    link: bool,
+}
+
+/// What a compile read beyond its pre-key: files by path and digest, in rustc's order, and the variables `env!` and
+/// `option_env!` looked up (none for one that was unset).
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    files: Vec<(String, String)>,
+    env: BTreeMap<String, Option<String>>,
 }
 
 impl Manifest {
@@ -245,6 +245,11 @@ impl Manifest {
     }
 }
 
+/// True when the file name of `path` ends in `.extension`.
+pub(crate) fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension().is_some_and(|found| found == extension)
+}
+
 /// The names of the manifests in `dir`, newest first; none when there is no such directory.
 fn newest_first(dir: &Path) -> anyhow::Result<Vec<String>> {
     let listed = match fs::read_dir(dir) {
@@ -266,7 +271,19 @@ fn newest_first(dir: &Path) -> anyhow::Result<Vec<String>> {
 }
 
 /// The program a command name runs: itself when it names a path, else the first match on `PATH`.
-pub(crate) fn which(program: &OsStr) -> Option<PathBuf> {
+/// What an earlier call remembered at `path`; nothing when it has not been remembered yet.
+fn remembered(path: &Path) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => {
+            eprintln!("warmd-rustc: reading {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+fn which(program: &OsStr) -> Option<PathBuf> {
     if Path::new(program).components().count() > 1 {
         return Some(PathBuf::from(program));
     }
@@ -274,7 +291,7 @@ pub(crate) fn which(program: &OsStr) -> Option<PathBuf> {
 }
 
 /// A file by where it really is and what says it changed, for programs that are not hashed.
-pub(crate) fn identity(path: &Path) -> Option<String> {
+fn identity(path: &Path) -> Option<String> {
     let real = fs::canonicalize(path).ok()?;
     let meta = fs::metadata(&real).ok()?;
     Some(format!("{} {} {} {}.{}", real.display(), meta.len(), meta.ino(), meta.mtime(), meta.mtime_nsec()))
@@ -325,17 +342,13 @@ fn current(path: &Path) -> anyhow::Result<digest::Digest> {
     digest::file(path)
 }
 
-fn has_extension(path: &Path, extension: &str) -> bool {
-    path.extension().is_some_and(|found| found == extension)
-}
-
 fn from_hex(text: &str) -> Option<digest::Digest> {
     let mut digest = [0; 32];
     if text.len() != 64 {
         return None;
     }
     for (byte, pair) in digest.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        *byte = u8::from_str_radix(from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(digest)
 }
@@ -383,7 +396,7 @@ fn split_escaped(deps: &str) -> Vec<String> {
             '\\' if chars.peek() == Some(&' ') => current.extend(chars.next()),
             ' ' => {
                 if !current.is_empty() {
-                    paths.push(std::mem::take(&mut current));
+                    paths.push(mem::take(&mut current));
                 }
             }
             _ => current.push(char),
@@ -416,22 +429,10 @@ fn unescape_env(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{File, FileTimes};
+    use std::thread;
 
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("warmd-rustc-store-{name}-{}", process::id()));
-        let _fresh = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn settled(path: &Path, bytes: &[u8]) {
-        fs::write(path, bytes).unwrap();
-        let past = SystemTime::now() - Duration::from_secs(60);
-        File::options().write(true).open(path).unwrap().set_times(FileTimes::new().set_modified(past)).unwrap();
-    }
+    use crate::digest::tests::{scratch, settled};
 
     /// Stores a compile of `src/lib.rs` that read the variables `env_deps`, as rustc would have written it.
     fn compile(root: &Path, store: &Store, pre: &str, env_deps: &str) {
@@ -509,7 +510,7 @@ mod tests {
         for version in 0..=MANIFESTS {
             settled(&root.join("src/lib.rs"), format!("pub fn f{version}() {{}}").as_bytes());
             compile(&root, &store, &pre, "");
-            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(newest_first(&store.manifests(&pre)).unwrap().len(), MANIFESTS);
         assert!(store.lookup(&pre).unwrap().is_some(), "the newest compile");

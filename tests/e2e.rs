@@ -40,6 +40,18 @@ const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\
 const MAIN_RS: &str =
     "printf 'fn main() {\\n    println!(\"{}\", demo::add(2, 3));\\n}\\n' > src/main.rs && git add -N src/main.rs";
 
+const STAMP_BUILD_RS: &str = r#"fn main() {
+    for var in ["SOURCE_DATE_EPOCH", "DEMO_PIN"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    println!("cargo:rustc-env=STAMP={}", var("SOURCE_DATE_EPOCH"));
+    println!("cargo:rustc-env=PIN={}", var("DEMO_PIN"));
+    println!("cargo:rustc-env=DEBUGINFO={}", var("DEBUG"));
+    println!("cargo:rustc-env=FLAGS={}", var("CARGO_ENCODED_RUSTFLAGS").replace('\x1f', " "));
+}
+"#;
+
 struct Warmd {
     child: Child,
     url: String,
@@ -636,28 +648,14 @@ fn the_rustc_cache_restores_crates_without_starting_rustc() {
     let rlib = fs::metadata(demo.join(rlib.trim())).unwrap();
     assert!(std::os::unix::fs::MetadataExt::nlink(&rlib) >= 2, "a library is a link to the store");
     let (_, said) = wrapped_build(&root, "one");
-    assert!(
-        said.contains("Fresh demo") && !said.contains("Compiling"),
-        "cargo takes the restored crates as fresh: {said}"
-    );
+    assert!(said.contains("Fresh demo"), "cargo takes the restored crates as fresh: {said}");
+    assert!(!said.contains("Compiling"), "cargo takes the restored crates as fresh: {said}");
 
     fs::remove_dir_all(demo.join("target")).unwrap();
     let (compiled, _) = wrapped_build(&root, "two");
     assert!(compiled.contains(&"dep".to_owned()), "a variable env! read changed: {compiled:?}");
     assert_eq!(sh(&demo, "target/debug/demo-cli"), "two\n");
 }
-
-const STAMP_BUILD_RS: &str = r#"fn main() {
-    for var in ["SOURCE_DATE_EPOCH", "DEMO_PIN"] {
-        println!("cargo:rerun-if-env-changed={var}");
-    }
-    let var = |name: &str| std::env::var(name).unwrap_or_default();
-    println!("cargo:rustc-env=STAMP={}", var("SOURCE_DATE_EPOCH"));
-    println!("cargo:rustc-env=PIN={}", var("DEMO_PIN"));
-    println!("cargo:rustc-env=DEBUGINFO={}", var("DEBUG"));
-    println!("cargo:rustc-env=FLAGS={}", var("CARGO_ENCODED_RUSTFLAGS").replace('\x1f', " "));
-}
-"#;
 
 #[test]
 fn builds_every_repo_with_its_tuning_on_main_and_patches_alike() {
