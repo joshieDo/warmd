@@ -195,20 +195,20 @@ git fetch -q origin
 default=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
 base=$(git merge-base HEAD "$default")
 patch=$(mktemp)
-trap 'rm -f "$patch"' EXIT
+trap 'rm -f "$patch" "$patch.body"' EXIT
 git diff --binary "$base" >"$patch"
 git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
   git diff --binary --no-index /dev/null "$file" >>"$patch" || true
 done
 
-body=$(jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
+jq -n --arg repo "$repo" --arg sha "$base" --arg branch "$branch" --rawfile patch "$patch" \
   --argjson full "$full" --argjson args "$args_json" --argjson skip "$skip" --argjson only "$only" --argjson tests "$tests" --argjson binary "$binary" \
   '{ repo: $repo, base: { sha: $sha }, patch: $patch, branch: $branch, session: (if $branch == "HEAD" then null else $branch end), full: $full, args: $args, skip: $skip, only: $only }
-   + (if $tests == null then {} else { tests: $tests } end) + (if $binary == null then {} else { binary: $binary } end)')
+   + (if $tests == null then {} else { tests: $tests } end) + (if $binary == null then {} else { binary: $binary } end)' >"$patch.body"
 endpoint=check
 [[ $cmd == test ]] && endpoint="test"
 [[ $cmd == build ]] && endpoint="build"
-if ! ids=$(curl -sS --fail-with-body -X POST "$url/$endpoint" -H 'content-type: application/json' -d "$body"); then
+if ! ids=$(curl -sS --fail-with-body -X POST "$url/$endpoint" -H 'content-type: application/json' --data-binary @"$patch.body"); then
   echo "warmd: $ids" >&2
   exit 2
 fi
