@@ -610,6 +610,11 @@ async fn check(
         ensure!(committed.ok(), "committing the baseline: {}", committed.stderr.trim());
     }
     clock.mark("commit");
+    if changed_files(&req.patch).iter().any(|file| file.ends_with("Cargo.toml") || file.ends_with("Cargo.lock")) {
+        let fetched = sandbox.run_online("cargo fetch").await?;
+        ensure!(fetched.ok(), "fetching the patch's dependencies: {}", fetched.tail());
+        clock.mark("fetch");
+    }
     if req.baseline_only {
         let update = "cargo-slapslop baseline update \"$PWD\" --accept-new --reason warmd >&2 && cat ";
         let out = sandbox.run(&format!("{update}{SLAPSLOP_BASELINE}"), None).await?;

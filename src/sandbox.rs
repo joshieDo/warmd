@@ -93,7 +93,7 @@ impl Sandbox<'_> {
 
     async fn run_quiet(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
         for attempt in 1..=MOUNT_ATTEMPTS {
-            let out = self.run_once(cmd, stdin).await?;
+            let out = self.run_once(cmd, stdin, false).await?;
             if !out.stderr.starts_with("bwrap: Can't make overlay mount") || attempt == MOUNT_ATTEMPTS {
                 return Ok(out);
             }
@@ -102,8 +102,15 @@ impl Sandbox<'_> {
         unreachable!("the last attempt returns")
     }
 
-    async fn run_once(self, cmd: &str, stdin: Option<&str>) -> anyhow::Result<Output> {
-        let mut child = self.spawn(cmd, None, stdin.is_some(), None).await?;
+    /// Runs `cmd` with network and a writable cargo home, for `cargo fetch` of the crates a patch adds: a check's
+    /// jobs run offline, so they find those crates only once this has put them in the shared cargo home.
+    pub(crate) async fn run_online(self, cmd: &str) -> anyhow::Result<Output> {
+        metrics::note_command(cmd);
+        self.run_once(cmd, None, true).await
+    }
+
+    async fn run_once(self, cmd: &str, stdin: Option<&str>, net: bool) -> anyhow::Result<Output> {
+        let mut child = self.spawn(cmd, None, stdin.is_some(), None, net).await?;
         if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
             pipe.write_all(text.as_bytes()).await?;
         }
@@ -120,7 +127,7 @@ impl Sandbox<'_> {
     /// Starts a long-running tool in the tree, its directory bound read-only and `vars` set, stdin and stdout piped.
     pub(crate) async fn serve(self, tool: &Path, vars: &[(&str, &str)]) -> anyhow::Result<Child> {
         let cmd = format!("exec '{}'", tool.display().to_string().replace('\'', "'\\''"));
-        self.spawn(&cmd, None, true, Some((ra::tool_dir(tool)?, vars))).await
+        self.spawn(&cmd, None, true, Some((ra::tool_dir(tool)?, vars)), false).await
     }
 
     /// Starts bwrap running `cmd` in the tree, with `results` (a host directory) bound at [`RESULTS`] when given,
@@ -131,6 +138,7 @@ impl Sandbox<'_> {
         results: Option<&Path>,
         stdin: bool,
         tool: Option<(&Path, &[(&str, &str)])>,
+        net: bool,
     ) -> anyhow::Result<Child> {
         let home = env::var_os("HOME").map(PathBuf::from).context("HOME is unset")?;
         let cargo_home = env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
@@ -169,7 +177,11 @@ impl Sandbox<'_> {
                 for tool in tuning.tools.iter().filter(|tool| tool.starts_with(&home)) {
                     bwrap.arg("--ro-bind-try").arg(tool).arg(tool);
                 }
-                bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
+                if net {
+                    bwrap.arg("--share-net").arg("--bind").arg(&cargo_home).arg(&cargo_home);
+                } else {
+                    bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
+                }
                 bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
                 bwrap.arg("--overlay-src").arg(lower);
                 if let Some(layer) = RUSTC_LAYER.get() {
@@ -230,7 +242,7 @@ impl Sandbox<'_> {
         create_dir_all(&dir).await?;
         let result = async {
             for attempt in 1..=MOUNT_ATTEMPTS {
-                let mut child = self.spawn(&lanes_script(lanes), Some(&dir), false, None).await?;
+                let mut child = self.spawn(&lanes_script(lanes), Some(&dir), false, None, false).await?;
                 let mut lines = BufReader::new(child.stdout.take().context("bwrap stdout")?).lines();
                 let mut finished = 0;
                 while let Some(line) = lines.next_line().await? {
