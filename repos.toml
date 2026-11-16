@@ -3,6 +3,20 @@ state_dir = "state"
 # Older main builds stay this long, so a check on a base main just moved past still runs on it.
 keep_hours = 2
 
+# How every repo's sandboxes build, main's warm builds and patches' alike (these are the defaults). Build stamps
+# are pinned: SOURCE_DATE_EPOCH plus `env` (smolgen/vergen stamp VERGEN_BUILD_TIMESTAMP from it). clang links with
+# `linker` (empty, or not installed: the default linker), rustc gets -Zthreads=`threads` on nightly toolchains (0:
+# none), and the dev and test profiles drop debug info unless `debuginfo`. A repo's [repos.<name>.tune] overrides
+# the keys it names, its `env` added to this one; `stamps = false` leaves the stamps alone.
+[tune]
+stamps = true
+source_date_epoch = 315532800
+env = {}
+linker = "mold"
+cc = "clang"
+threads = 8
+debuginfo = false
+
 [repos.tempo]
 url = "https://github.com/tempoxyz/tempo"
 clippy = "RUSTFLAGS='-D warnings' cargo +nightly-2026-10-31 clippy --locked --message-format=json"

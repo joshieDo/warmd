@@ -1,8 +1,9 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::Duration,
 };
 
@@ -64,6 +65,57 @@ const RUSTC_STORE: &str = "target/.warmd-rustc";
 /// The directory whose [`RUSTC_STORE`] is the rustc cache: an overlay's top lower layer, so a cached output comes
 /// back as a reflink (a clone stays inside one mount).
 static RUSTC_LAYER: OnceLock<PathBuf> = OnceLock::new();
+
+/// Each repo's [`Tuning`], from the last repos.toml read.
+static TUNINGS: Mutex<BTreeMap<String, Arc<Tuning>>> = Mutex::new(BTreeMap::new());
+
+/// Where the sandbox puts the `cargo` that adds a repo's rustc flags, first on PATH.
+const TUNE_DIR: &str = "/tmp/warmd-tune";
+
+/// The `cargo` [`TUNE_DIR`] holds: it adds a repo's rustc flags to the command's own and runs the real cargo.
+const CARGO_SHIM: &str = include_str!("cargo-shim.sh");
+
+/// The build environment of a repo's sandboxes, the same for main's builds and patches'.
+#[derive(Debug, Default)]
+pub(crate) struct Tuning {
+    /// Variables every command gets.
+    pub(crate) env: Vec<(String, String)>,
+    /// Variables the tuning owns but leaves out, removed so warmd's own environment does not reach the builds.
+    pub(crate) unset: Vec<String>,
+    /// rustc flags added to every cargo command's `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`, when it sets that).
+    pub(crate) rustflags: Vec<String>,
+    /// rustc flags added only when the cargo command's toolchain takes `-Z` options.
+    pub(crate) nightly_rustflags: Vec<String>,
+    /// Host tools the flags name, bound into trees that hide the home they may sit under.
+    pub(crate) tools: Vec<PathBuf>,
+}
+
+impl Tuning {
+    /// The script that installs [`TUNE_DIR`]'s `cargo`: it drops its directory from PATH, adds the flags to the
+    /// ones the command set, and runs the real cargo. None when there are no flags to add.
+    fn cargo_shim(&self) -> Option<String> {
+        if self.rustflags.is_empty() && self.nightly_rustflags.is_empty() {
+            return None;
+        }
+        let shim = CARGO_SHIM
+            .replace("{dir}", TUNE_DIR)
+            .replace("{flags}", &self.rustflags.join(" "))
+            .replace("{nightly}", &self.nightly_rustflags.join(" "));
+        Some(format!(
+            "mkdir -p {TUNE_DIR} && cat >{TUNE_DIR}/cargo <<'WARMD_TUNE' && chmod +x {TUNE_DIR}/cargo\n{shim}WARMD_TUNE\n"
+        ))
+    }
+}
+
+/// Makes every sandbox from now on build each repo with its tuning.
+pub(crate) fn set_tunings(tunings: impl IntoIterator<Item = (String, Tuning)>) {
+    *TUNINGS.lock().unwrap_or_else(PoisonError::into_inner) =
+        tunings.into_iter().map(|(repo, tuning)| (repo, Arc::new(tuning))).collect();
+}
+
+fn tuning(repo: &str) -> Arc<Tuning> {
+    TUNINGS.lock().unwrap_or_else(PoisonError::into_inner).get(repo).cloned().unwrap_or_default()
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sandbox<'a> {
@@ -127,6 +179,7 @@ impl Sandbox<'_> {
         let rustup_home = env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
         let cache = home.join(".cache");
         let work = work_path(self.repo);
+        let tuning = tuning(self.repo);
         let mut bwrap = Command::new("bwrap");
         bwrap.args(["--die-with-parent", "--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]);
         bwrap.args(["--tmpfs", "/tmp"]);
@@ -154,6 +207,9 @@ impl Sandbox<'_> {
                     }),
                 ) {
                     bwrap.arg("--ro-bind-try").arg(&tool_dir).arg(&tool_dir);
+                }
+                for tool in tuning.tools.iter().filter(|tool| tool.starts_with(&home)) {
+                    bwrap.arg("--ro-bind-try").arg(tool).arg(tool);
                 }
                 bwrap.arg("--overlay-src").arg(&cargo_home).arg("--tmp-overlay").arg(&cargo_home);
                 bwrap.arg("--overlay-src").arg(repo_cache).arg("--tmp-overlay").arg(&cache);
@@ -186,7 +242,19 @@ impl Sandbox<'_> {
                 bwrap.args(["--setenv", name, value]);
             }
         }
-        bwrap.args(["--chdir", &work, "sh", "-c", cmd]);
+        for (name, value) in &tuning.env {
+            bwrap.args(["--setenv", name, value]);
+        }
+        for name in &tuning.unset {
+            bwrap.args(["--unsetenv", name]);
+        }
+        let shim = tuning.cargo_shim();
+        if shim.is_some() {
+            let path = env::var("PATH").unwrap_or_default();
+            bwrap.args(["--setenv", "PATH", &format!("{TUNE_DIR}:{path}")]);
+        }
+        let script = shim.map_or_else(|| cmd.to_owned(), |shim| format!("{shim}{cmd}"));
+        bwrap.args(["--chdir", &work, "sh", "-c", &script]);
         bwrap.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
         bwrap.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         bwrap.spawn().context("starting bwrap")
@@ -325,12 +393,12 @@ pub(crate) fn work_path(repo: &str) -> String {
 }
 
 /// Turns the rustc cache on for every sandbox from now on, with `layer` holding the store, when `warmd-rustc` sits
-/// next to this binary. Returns the store's `v1` directory.
+/// next to this binary. Returns the store's `v2` directory.
 pub(crate) fn use_rustc_cache(layer: PathBuf) -> anyhow::Result<Option<PathBuf>> {
     if !env::current_exe()?.with_file_name("warmd-rustc").is_file() {
         return Ok(None);
     }
-    let store = layer.join(RUSTC_STORE).join("v1");
+    let store = layer.join(RUSTC_STORE).join("v2");
     fs::create_dir_all(&store)?;
     RUSTC_LAYER.get_or_init(|| layer);
     Ok(Some(store))
@@ -343,7 +411,7 @@ pub(crate) fn harvest_rustc_cache(layer: &Path) -> anyhow::Result<usize> {
     };
     let added = layer.join("upper").join(RUSTC_STORE);
     let mut moved = 0;
-    let mut pending = vec![added.join("v1")];
+    let mut pending = vec![added.join("v2")];
     while let Some(dir) = pending.pop() {
         for entry in match fs::read_dir(&dir) {
             Ok(entries) => entries,
