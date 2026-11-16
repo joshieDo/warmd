@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     slice,
 };
@@ -9,7 +9,18 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use toml::from_str;
 
+use crate::sandbox::{self, Tuning};
+
 pub(crate) const FULL_CLIPPY: &str = include_str!("full-clippy.toml");
+
+/// The `SOURCE_DATE_EPOCH` pinned build stamps carry by default: 1980-01-01.
+const SOURCE_DATE_EPOCH: u64 = 315_532_800;
+
+const DEFAULT_LINKER: &str = "mold";
+
+const DEFAULT_CC: &str = "clang";
+
+const DEFAULT_THREADS: u32 = 8;
 
 const FULL: &str = include_str!("full.toml");
 
@@ -26,12 +37,104 @@ pub(crate) struct Config {
     pub(crate) jobs_per_repo: u16,
     #[serde(default = "default_lease_secs")]
     pub(crate) lease_secs: u64,
+    /// How every repo's sandboxes build, unless the repo's own `tune` says otherwise.
+    #[serde(default)]
+    pub(crate) tune: Tune,
     pub(crate) repos: BTreeMap<String, RepoCfg>,
 }
 
 impl Config {
+    /// Reads repos.toml and makes every sandbox from now on build with its repo's tuning.
     pub(crate) fn load(dir: &Path) -> anyhow::Result<Self> {
-        read(&dir.join("repos.toml"))
+        let config: Self = read(&dir.join("repos.toml"))?;
+        sandbox::set_tunings(
+            config.repos.iter().map(|(name, repo)| (name.clone(), config.tune.over(repo.tune.as_ref()).resolve(name))),
+        );
+        Ok(config)
+    }
+}
+
+/// The build environment every sandbox job of a repo gets, main's warm builds and patches' alike, so they share
+/// cargo's fingerprints and the rustc cache. It applies to every job, clippy too: clippy and the test job share
+/// `target/debug` (build scripts, proc macros), and different flags there would rebuild them back and forth.
+///
+/// At the top level it sets every repo's defaults; a repo's `[repos.<name>.tune]` overrides the keys it names.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Tune {
+    /// Pins the build stamps (default true): `SOURCE_DATE_EPOCH` and `env`, so a build script stamping the time
+    /// (vergen/smolgen's `VERGEN_BUILD_TIMESTAMP`) gives the same output on every build and its dependents stay warm.
+    stamps: Option<bool>,
+    /// The `SOURCE_DATE_EPOCH` pinned stamps carry: default 315532800 (1980-01-01, the earliest date zip and wheel
+    /// tools take), never a commit's time, which would change on every main.
+    source_date_epoch: Option<u64>,
+    /// More variables pinned with the stamps (a repo's are added to the top level's), such as `VERGEN_GIT_SHA`.
+    env: Option<BTreeMap<String, String>>,
+    /// The linker clang links with (`--ld-path`), a name on PATH or a path: default `mold`, empty for the default
+    /// linker, which is also used when it or `cc` is not installed.
+    linker: Option<String>,
+    /// The C compiler that drives the link, a name on PATH or a path: default `clang`.
+    cc: Option<String>,
+    /// rustc's front-end threads (`-Zthreads`), for nightly toolchains only: default 8, 0 for none.
+    threads: Option<u32>,
+    /// Keeps the dev and test profiles' debug info (default false: `CARGO_PROFILE_{DEV,TEST}_DEBUG=false`).
+    debuginfo: Option<bool>,
+}
+
+impl Tune {
+    /// This tuning with `repo`'s keys over it; their `env`s merge, the repo's winning.
+    fn over(&self, repo: Option<&Self>) -> Self {
+        let Some(repo) = repo else {
+            return self.clone();
+        };
+        let mut env = self.env.clone().unwrap_or_default();
+        env.extend(repo.env.clone().unwrap_or_default());
+        Self {
+            stamps: repo.stamps.or(self.stamps),
+            source_date_epoch: repo.source_date_epoch.or(self.source_date_epoch),
+            env: Some(env),
+            linker: repo.linker.clone().or_else(|| self.linker.clone()),
+            cc: repo.cc.clone().or_else(|| self.cc.clone()),
+            threads: repo.threads.or(self.threads),
+            debuginfo: repo.debuginfo.or(self.debuginfo),
+        }
+    }
+
+    /// The variables and rustc flags `repo`'s sandboxes get, with the linker found on PATH or left out.
+    fn resolve(&self, repo: &str) -> Tuning {
+        let mut env = Vec::new();
+        let mut unset = Vec::new();
+        if self.stamps.unwrap_or(true) {
+            env.push(("SOURCE_DATE_EPOCH".to_owned(), self.source_date_epoch.unwrap_or(SOURCE_DATE_EPOCH).to_string()));
+            env.extend(self.env.clone().unwrap_or_default());
+        } else {
+            unset.push("SOURCE_DATE_EPOCH".to_owned());
+        }
+        for profile in ["DEV", "TEST"] {
+            let name = format!("CARGO_PROFILE_{profile}_DEBUG");
+            if self.debuginfo.unwrap_or(false) {
+                unset.push(name);
+            } else {
+                env.push((name, "false".to_owned()));
+            }
+        }
+        let mut rustflags = Vec::new();
+        let mut tools = Vec::new();
+        let linker = self.linker.as_deref().unwrap_or(DEFAULT_LINKER);
+        if !linker.is_empty() {
+            let cc = self.cc.as_deref().unwrap_or(DEFAULT_CC);
+            match (find_tool(cc), find_tool(linker)) {
+                (Some(cc), Some(linker)) => {
+                    rustflags.push(format!("-Clinker={}", cc.display()));
+                    rustflags.push(format!("-Clink-arg=--ld-path={}", linker.display()));
+                    tools.extend([cc, linker]);
+                }
+                _ => eprintln!("warmd: {repo}: {cc} or {linker} is not installed, linking with the default linker"),
+            }
+        }
+        let threads = self.threads.unwrap_or(DEFAULT_THREADS);
+        let nightly_rustflags = if threads == 0 { Vec::new() } else { vec![format!("-Zthreads={threads}")] };
+        Tuning { env, unset, rustflags, nightly_rustflags, tools }
     }
 }
 
@@ -49,6 +152,8 @@ pub(crate) struct RepoCfg {
     #[serde(default = "default_build")]
     pub(crate) build: String,
     pub(crate) ra: Option<RaCfg>,
+    /// This repo's overrides of the top-level `tune`.
+    pub(crate) tune: Option<Tune>,
 }
 
 impl RepoCfg {
@@ -246,6 +351,18 @@ impl Binary {
         }
         cmd
     }
+}
+
+/// Where `name` is: itself when it holds a `/`, else the first match on PATH; none when it is not a file, or its
+/// path holds whitespace, which a `RUSTFLAGS` entry cannot.
+fn find_tool(name: &str) -> Option<PathBuf> {
+    let found = if name.contains('/') {
+        Some(PathBuf::from(name)).filter(|path| path.is_file())
+    } else {
+        env::var_os("PATH")
+            .and_then(|path| env::split_paths(&path).map(|dir| dir.join(name)).find(|path| path.is_file()))
+    }?;
+    (!found.to_string_lossy().contains(char::is_whitespace)).then_some(found)
 }
 
 /// Why `name` is not a package or target name, if it is not.

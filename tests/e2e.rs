@@ -40,6 +40,18 @@ const FIRST: &str = "printf '\npub fn first(v: &Vec<u32>) -> u32 {\n    v[0]\n}\
 const MAIN_RS: &str =
     "printf 'fn main() {\\n    println!(\"{}\", demo::add(2, 3));\\n}\\n' > src/main.rs && git add -N src/main.rs";
 
+const STAMP_BUILD_RS: &str = r#"fn main() {
+    for var in ["SOURCE_DATE_EPOCH", "DEMO_PIN"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    println!("cargo:rustc-env=STAMP={}", var("SOURCE_DATE_EPOCH"));
+    println!("cargo:rustc-env=PIN={}", var("DEMO_PIN"));
+    println!("cargo:rustc-env=DEBUGINFO={}", var("DEBUG"));
+    println!("cargo:rustc-env=FLAGS={}", var("CARGO_ENCODED_RUSTFLAGS").replace('\x1f', " "));
+}
+"#;
+
 struct Warmd {
     child: Child,
     url: String,
@@ -69,7 +81,13 @@ impl Warmd {
             origin = origin.display(),
         );
         fs::write(dir.join("repos.toml"), repos).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_warmd")).arg(&dir).envs(env.iter().copied()).spawn().unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_warmd"))
+            .arg(&dir)
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .envs(env.iter().copied())
+            .spawn()
+            .unwrap();
         let warmd = Self { child, url: format!("http://127.0.0.1:{port}"), root: origin.to_owned() };
         until(|| warmd.repo()["current"].is_string());
         warmd
@@ -546,6 +564,140 @@ fn builds_the_binary_of_a_patch_in_debug_or_release() {
         warmd.job("build", &json!({ "repo": "demo", "base": base, "patch": broken, "binary": { "package": "demo" } }));
     assert_eq!(job["result"]["ok"], false, "{job:#}");
     assert!(job["result"]["output"].as_str().is_some_and(|out| out.contains("mismatched types")), "{job:#}");
-    let units = root.join("state/rustc/target/.warmd-rustc/v1/units");
+    let units = root.join("state/rustc/target/.warmd-rustc/v2/units");
     assert!(fs::read_dir(&units).is_ok_and(|mut found| found.next().is_some()), "rustc's outputs went to the cache");
+}
+
+/// Builds a crate with a dependency, a C library and an executable through warmd-rustc into a target directory
+/// with a `rustc` on PATH that logs what it compiles, and returns those crate names with what cargo said.
+fn wrapped_build(root: &Path, value: &str) -> (Vec<String>, String) {
+    let log = root.join("rustc.log");
+    fs::write(&log, "").unwrap();
+    let out = Command::new("cargo")
+        .args(["build", "--verbose"])
+        .current_dir(root.join("demo"))
+        .env("PATH", format!("{}:{}", root.join("toolchain/bin").display(), std::env::var("PATH").unwrap()))
+        .env("RUSTC", "rustc")
+        .env("RUSTC_WRAPPER", env!("CARGO_BIN_EXE_warmd-rustc"))
+        .env("WARMD_RUSTC_STORE", root.join("store"))
+        .env("WARMD_RUSTC_LOG", &log)
+        .env("CARGO_INCREMENTAL", "1")
+        .env("DEMO_VALUE", value)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .output()
+        .unwrap();
+    let said = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{said}");
+    let compiled = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split(' ').skip_while(|arg| *arg != "--crate-name").nth(1).map(str::to_owned))
+        .filter(|name| name != "___")
+        .collect();
+    (compiled, said)
+}
+
+#[test]
+fn the_rustc_cache_restores_crates_without_starting_rustc() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rustc-cache-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).unwrap();
+    }
+    for dir in ["toolchain/bin", "toolchain/lib", "demo/src", "demo/dep/src"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let sysroot = sh(&root, "rustc --print sysroot");
+    let shim = root.join("toolchain/bin/rustc");
+    fs::write(
+        &shim,
+        format!("#!/bin/sh\necho \"$*\" >> \"$WARMD_RUSTC_LOG\"\nexec {}/bin/rustc \"$@\"\n", sysroot.trim()),
+    )
+    .unwrap();
+    sh(&root, &format!("chmod +x {}", shim.display()));
+    fs::write(root.join("demo/dep/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")
+        .unwrap();
+    fs::write(root.join("demo/dep/src/lib.rs"), "pub fn value() -> &'static str {\n    env!(\"DEMO_VALUE\")\n}\n")
+        .unwrap();
+    fs::write(
+        root.join("demo/Cargo.toml"),
+        "[workspace]\n\n[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"lib\", \"cdylib\"]\n\n[[bin]]\nname = \"demo-cli\"\npath = \"src/main.rs\"\n\n[dependencies]\ndep = { path = \"dep\" }\n",
+    )
+    .unwrap();
+    fs::write(root.join("demo/src/lib.rs"), "pub fn value() -> &'static str {\n    dep::value()\n}\n").unwrap();
+    fs::write(root.join("demo/src/main.rs"), "fn main() {\n    println!(\"{}\", demo::value());\n}\n").unwrap();
+    let demo = root.join("demo");
+    let target = demo.join("target/debug");
+
+    let (mut compiled, _) = wrapped_build(&root, "one");
+    compiled.sort();
+    assert_eq!(compiled, ["demo", "demo_cli", "dep"], "everything compiles once");
+    assert!(root.join("store/v2/units").is_dir());
+    assert_eq!(sh(&demo, "target/debug/demo-cli"), "one\n");
+
+    fs::remove_dir_all(demo.join("target")).unwrap();
+    let (compiled, said) = wrapped_build(&root, "one");
+    assert_eq!(compiled, Vec::<String>::new(), "every crate comes from the cache: {said}");
+    assert!(said.contains("Compiling dep"), "cargo ran the wrapper for every crate: {said}");
+    assert_eq!(sh(&demo, "target/debug/demo-cli"), "one\n");
+    assert!(target.join("libdemo.so").is_file(), "the C library came back");
+    let incremental = fs::read_dir(target.join("incremental")).map_or(0, Iterator::count);
+    assert_eq!(incremental, 0, "a hit leaves the incremental directory alone");
+    let rlib = sh(&demo, "find target -name 'libdep-*.rlib'");
+    let rlib = fs::metadata(demo.join(rlib.trim())).unwrap();
+    assert!(std::os::unix::fs::MetadataExt::nlink(&rlib) >= 2, "a library is a link to the store");
+    let (_, said) = wrapped_build(&root, "one");
+    assert!(said.contains("Fresh demo"), "cargo takes the restored crates as fresh: {said}");
+    assert!(!said.contains("Compiling"), "cargo takes the restored crates as fresh: {said}");
+
+    fs::remove_dir_all(demo.join("target")).unwrap();
+    let (compiled, _) = wrapped_build(&root, "two");
+    assert!(compiled.contains(&"dep".to_owned()), "a variable env! read changed: {compiled:?}");
+    assert_eq!(sh(&demo, "target/debug/demo-cli"), "two\n");
+}
+
+#[test]
+fn builds_every_repo_with_its_tuning_on_main_and_patches_alike() {
+    let root = demo_root("tune");
+    let channel =
+        include_str!("../rust-toolchain.toml").lines().find_map(|line| line.strip_prefix("channel = ")).unwrap();
+    let demo = root.join("demo");
+    fs::write(demo.join("build.rs"), STAMP_BUILD_RS).unwrap();
+    fs::write(demo.join("rust-toolchain.toml"), format!("[toolchain]\nchannel = {channel}\n")).unwrap();
+    sh(&demo, "git add -A && git -c user.name=t -c user.email=t@t commit -qm stamps && git push -q ../demo.git main");
+    let top = format!(
+        "[tune]\nenv = {{ DEMO_PIN = \"pinned\" }}\nthreads = 2\n\n[repos.demo.tune]\nthreads = 3\n\n[repos.plain]\nurl = \"file://{}/demo.git\"\ntune = {{ stamps = false, linker = \"\", threads = 0, debuginfo = true }}\njobs = [\n{TESTS}]\n",
+        root.display()
+    );
+    let warmd = Warmd::serve(root.clone(), &root, &top, TESTS, &[]);
+    until(|| warmd.get("/repos/plain")["current"].is_string());
+    let linked = sh(&root, "command -v clang >/dev/null && command -v mold >/dev/null && echo yes || true") == "yes\n";
+    let base = json!({ "sha": warmd.head() });
+    let check = |repo: &str, test: &str| {
+        let patch = warmd.diff(&format!("printf '\\n#[test]\\nfn stamped() {{\\n{test}}}\\n' >> src/lib.rs"));
+        let body =
+            json!({ "repo": repo, "base": base, "patch": patch, "tests": { "package": "demo", "names": ["stamped"] } });
+        let job = warmd.job("test", &body);
+        let ran = &job["result"]["jobs"];
+        assert_eq!(names(ran), ["test"], "{job:#}");
+        assert_eq!(ran[0]["exit"], 0, "{repo}: {job:#}");
+        assert!(ran[0]["output"].as_str().unwrap().contains("test stamped ... ok"), "{job:#}");
+    };
+
+    let linker = if linked {
+        "assert!(env!(\"FLAGS\").contains(\"-Clink-arg=--ld-path=\"));"
+    } else {
+        "assert!(!env!(\"FLAGS\").contains(\"--ld-path\"));"
+    };
+    check(
+        "demo",
+        &format!(
+            "assert_eq!(env!(\"STAMP\"), \"315532800\");\nassert_eq!(env!(\"PIN\"), \"pinned\");\nassert_eq!(env!(\"DEBUGINFO\"), \"false\");\nassert!(env!(\"FLAGS\").contains(\"-Zthreads=3\"));\n{linker}\n"
+        ),
+    );
+    check(
+        "plain",
+        "assert_eq!(env!(\"STAMP\"), \"\");\nassert_eq!(env!(\"PIN\"), \"\");\nassert_eq!(env!(\"DEBUGINFO\"), \"true\");\nassert_eq!(env!(\"FLAGS\"), \"\");\n",
+    );
 }
